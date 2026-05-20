@@ -279,6 +279,11 @@ button {
   font-weight: 700;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
 .primary-button {
   color: white;
   border-color: #0e4f47;
@@ -288,6 +293,11 @@ button {
 .ghost-button {
   color: var(--text);
   background: var(--panel);
+}
+
+.ai-button {
+  border-color: rgba(38, 91, 159, 0.28);
+  background: color-mix(in srgb, var(--panel) 78%, #265b9f 10%);
 }
 
 .danger-button {
@@ -326,6 +336,13 @@ button {
   max-width: 760px;
   font-size: 34px;
   line-height: 1.12;
+}
+
+.hero-actions,
+.modal-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .stats-grid {
@@ -407,6 +424,25 @@ button {
   display: grid;
   gap: 8px;
   margin-top: 14px;
+}
+
+.recent-empty {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  min-height: 250px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.recent-empty img {
+  width: 210px;
+  opacity: 0.92;
+}
+
+.recent-empty strong {
+  color: var(--text);
+  font-size: 18px;
 }
 
 .recent-row {
@@ -812,6 +848,77 @@ button {
 .modal-actions {
   justify-content: flex-end;
   margin-top: 22px;
+}
+
+.modal-actions.split {
+  justify-content: space-between;
+}
+
+.ai-modal {
+  width: min(900px, calc(100vw - 56px));
+}
+
+.ai-input {
+  margin-top: 18px;
+}
+
+.error-banner {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(156, 47, 47, 0.2);
+  border-radius: 8px;
+  color: #9c2f2f;
+  background: rgba(156, 47, 47, 0.08);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ai-preview {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.draft-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.draft-preview-grid div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 82%, transparent);
+}
+
+.draft-preview-grid .wide {
+  grid-column: 1 / -1;
+}
+
+.draft-preview-grid span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.draft-preview-grid strong,
+.draft-preview-grid pre {
+  margin: 0;
+  white-space: pre-wrap;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.58;
+}
+
+.draft-preview-grid pre {
+  font-family: "Cascadia Code", Consolas, monospace;
 }
 
 .hidden {

@@ -1,5 +1,4 @@
 import type { Idea, ThemeMode } from "./types";
-import { sampleIdeas } from "./sampleData";
 
 const IDEAS_KEY = "new-ideas:ideas:v1";
 const THEME_KEY = "new-ideas:theme:v1";
@@ -7,11 +6,11 @@ const THEME_KEY = "new-ideas:theme:v1";
 export function loadIdeas(): Idea[] {
   try {
     const raw = localStorage.getItem(IDEAS_KEY);
-    if (!raw) return sampleIdeas;
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : sampleIdeas;
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return sampleIdeas;
+    return [];
   }
 }
 

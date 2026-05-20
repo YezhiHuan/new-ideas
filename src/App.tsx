@@ -36,8 +36,9 @@ import {
   statusMeta,
   statusOrder,
 } from "./constants";
+import { draftToIdea, generateIdeaWithAI, ideaToDraft, organizeIdeaWithAI } from "./ai";
 import { exportIdeas, importIdeasFromFile, loadIdeas, loadTheme, saveIdeas, saveTheme } from "./storage";
-import type { Idea, IdeaStatus, Priority, RelatedRepository, RepositoryType, SortMode, ThemeMode, ViewMode } from "./types";
+import type { Idea, IdeaDraft, IdeaStatus, Priority, RelatedRepository, RepositoryType, SortMode, ThemeMode, ViewMode } from "./types";
 import {
   createId,
   formatDate,
@@ -86,6 +87,7 @@ export default function App() {
   const [sortMode, setSortMode] = useState<SortMode>("updated_desc");
   const [selectedId, setSelectedId] = useState(() => loadIdeas()[0]?.id ?? "");
   const [editingIdea, setEditingIdea] = useState<Idea | null>(null);
+  const [aiModalOpen, setAiModalOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => saveIdeas(ideas), [ideas]);
@@ -212,6 +214,7 @@ export default function App() {
           onQueryChange={setQuery}
           onSortChange={setSortMode}
           onNewIdea={() => setEditingIdea(createBlankIdea())}
+          onAiNewIdea={() => setAiModalOpen(true)}
           onBoard={() => setView("board")}
         />
 
@@ -221,6 +224,7 @@ export default function App() {
             recentIdeas={recentIdeas}
             ideas={ideas}
             onNewIdea={() => setEditingIdea(createBlankIdea())}
+            onAiNewIdea={() => setAiModalOpen(true)}
             onSelect={(idea) => {
               setSelectedId(idea.id);
               setStatusFilter("all");
@@ -274,6 +278,16 @@ export default function App() {
       </section>
 
       <input ref={importInputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleImport} />
+
+      {aiModalOpen && (
+        <AIIdeaModal
+          onClose={() => setAiModalOpen(false)}
+          onInsert={(draft) => {
+            setEditingIdea(draftToIdea(draft));
+            setAiModalOpen(false);
+          }}
+        />
+      )}
 
       {editingIdea && (
         <IdeaEditorModal
@@ -380,6 +394,7 @@ function Header({
   onQueryChange,
   onSortChange,
   onNewIdea,
+  onAiNewIdea,
   onBoard,
 }: {
   view: ViewMode;
@@ -389,6 +404,7 @@ function Header({
   onQueryChange: (query: string) => void;
   onSortChange: (sort: SortMode) => void;
   onNewIdea: () => void;
+  onAiNewIdea: () => void;
   onBoard: () => void;
 }) {
   const title =
@@ -441,6 +457,10 @@ function Header({
           <Layers3 size={18} />
           看板
         </button>
+        <button className="ghost-button ai-button" onClick={onAiNewIdea}>
+          <Sparkles size={18} />
+          AI 新建 Idea
+        </button>
         <button className="primary-button" onClick={onNewIdea}>
           <Plus size={18} />
           新建 Idea
@@ -455,6 +475,7 @@ function Dashboard({
   recentIdeas,
   ideas,
   onNewIdea,
+  onAiNewIdea,
   onSelect,
   onStatusSelect,
 }: {
@@ -462,6 +483,7 @@ function Dashboard({
   recentIdeas: Idea[];
   ideas: Idea[];
   onNewIdea: () => void;
+  onAiNewIdea: () => void;
   onSelect: (idea: Idea) => void;
   onStatusSelect: (status: IdeaStatus) => void;
 }) {
@@ -478,10 +500,16 @@ function Dashboard({
           <h2>从灵感池到论文成果，一屏看清研究路线。</h2>
           <p>把问题背景、技术路线、实验计划和文档仓库放在同一个轻量桌面工作台里。</p>
         </div>
-        <button className="primary-button" onClick={onNewIdea}>
-          <Plus size={18} />
-          记录新灵感
-        </button>
+        <div className="hero-actions">
+          <button className="ghost-button ai-button" onClick={onAiNewIdea}>
+            <Sparkles size={18} />
+            AI 新建 Idea
+          </button>
+          <button className="primary-button" onClick={onNewIdea}>
+            <Plus size={18} />
+            记录新灵感
+          </button>
+        </div>
       </div>
 
       <div className="stats-grid">
@@ -529,6 +557,13 @@ function Dashboard({
               <ChevronRight size={18} />
             </button>
           ))}
+          {recentIdeas.length === 0 && (
+            <div className="recent-empty">
+              <img src="/assets/empty-state.png" alt="" />
+              <strong>还没有科研 idea，创建你的第一个灵感。</strong>
+              <span>可以手动新建，也可以用 AI 从一句自然语言描述开始整理。</span>
+            </div>
+          )}
         </div>
       </section>
     </section>
@@ -552,7 +587,7 @@ function IdeaList({
     return (
       <section className="idea-list empty-panel">
         <img src="/assets/empty-state.png" alt="" />
-        <h2>记录你的第一个科研灵感</h2>
+        <h2>还没有科研 idea，创建你的第一个灵感。</h2>
         <p>空列表会显示在这里。新建一个 idea 后，就可以持续补充内容、计划和文档仓库。</p>
         <button className="primary-button" onClick={onNewIdea}>
           <Plus size={18} />
@@ -828,6 +863,17 @@ function SettingsPage({
       <div className="settings-card">
         <Sparkles size={22} />
         <div>
+          <h2>AI 功能</h2>
+          <p>
+            AI 新建和 AI 整理通过 Rust Tauri command 调用 OpenAI Responses API。API Key 只从本机环境变量
+            OPENAI_API_KEY 读取，.env 不会提交到 GitHub。
+          </p>
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <Sparkles size={22} />
+        <div>
           <h2>关于 NEW IDEAS</h2>
           <p>MVP 已预留 SQLite、Markdown 编辑器、附件管理、云同步和 Tauri 文件打开能力的接入位置。</p>
         </div>
@@ -836,9 +882,86 @@ function SettingsPage({
   );
 }
 
+function AIIdeaModal({ onClose, onInsert }: { onClose: () => void; onInsert: (draft: IdeaDraft) => void }) {
+  const [input, setInput] = useState("");
+  const [generatedDraft, setGeneratedDraft] = useState<IdeaDraft | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function generate() {
+    if (!input.trim()) {
+      setError("请输入科研 idea 描述后再生成。");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setGeneratedDraft(await generateIdeaWithAI(input));
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : String(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <section className="idea-modal ai-modal">
+        <div className="modal-heading">
+          <div>
+            <p className="eyebrow">AI idea composer</p>
+            <h2>AI 新建 Idea</h2>
+          </div>
+          <button type="button" className="ghost-button icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <label className="field wide ai-input">
+          <span>Natural Language Description</span>
+          <textarea
+            value={input}
+            onChange={(event) => setInput(event.target.value)}
+            rows={6}
+            placeholder="例如：我想研究转轮除湿系统中传感器噪声对模型辨识的影响，可能用 UKF 或粒子滤波做数据同化。"
+            autoFocus
+          />
+        </label>
+
+        {error && <div className="error-banner">{error}</div>}
+
+        <div className="modal-actions split">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            取消
+          </button>
+          <button type="button" className="primary-button" onClick={generate} disabled={loading}>
+            <Sparkles size={18} />
+            {loading ? "生成中..." : generatedDraft ? "重新生成" : "生成结构化 Idea"}
+          </button>
+        </div>
+
+        {generatedDraft && (
+          <section className="ai-preview">
+            <div className="section-title compact">
+              <h3>生成结果预览</h3>
+              <button type="button" className="primary-button" onClick={() => onInsert(generatedDraft)}>
+                <Plus size={16} />
+                插入到新建 Idea 表单
+              </button>
+            </div>
+            <IdeaDraftPreview draft={generatedDraft} />
+          </section>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function IdeaEditorModal({ idea, onClose, onSave }: { idea: Idea; onClose: () => void; onSave: (idea: Idea) => void }) {
   const [draft, setDraft] = useState<Idea>(idea);
   const [tagsInput, setTagsInput] = useState(idea.tags.join(", "));
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
 
   function patch<K extends keyof Idea>(key: K, value: Idea[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -856,6 +979,20 @@ function IdeaEditorModal({ idea, onClose, onSave }: { idea: Idea; onClose: () =>
     onSave({ ...draft, tags: normalizeTags(tagsInput) });
   }
 
+  async function organizeWithAI() {
+    setAiLoading(true);
+    setAiError("");
+    try {
+      const result = await organizeIdeaWithAI(ideaToDraft({ ...draft, tags: normalizeTags(tagsInput) }));
+      setDraft(draftToIdea(result, draft));
+      setTagsInput(result.tags.join(", "));
+    } catch (currentError) {
+      setAiError(currentError instanceof Error ? currentError.message : String(currentError));
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <form className="idea-modal" onSubmit={submit}>
@@ -864,10 +1001,18 @@ function IdeaEditorModal({ idea, onClose, onSave }: { idea: Idea; onClose: () =>
             <p className="eyebrow">Idea editor</p>
             <h2>{idea.title ? "编辑科研 idea" : "新建科研 idea"}</h2>
           </div>
-          <button type="button" className="ghost-button icon-button" onClick={onClose}>
-            <X size={18} />
-          </button>
+          <div className="modal-heading-actions">
+            <button type="button" className="ghost-button ai-button" onClick={organizeWithAI} disabled={aiLoading}>
+              <Sparkles size={18} />
+              {aiLoading ? "整理中..." : "AI 整理"}
+            </button>
+            <button type="button" className="ghost-button icon-button" onClick={onClose}>
+              <X size={18} />
+            </button>
+          </div>
         </div>
+
+        {aiError && <div className="error-banner">{aiError}</div>}
 
         <div className="form-grid">
           <label className="field wide">
@@ -978,6 +1123,45 @@ function IdeaEditorModal({ idea, onClose, onSave }: { idea: Idea; onClose: () =>
           </button>
         </div>
       </form>
+    </div>
+  );
+}
+
+function IdeaDraftPreview({ draft }: { draft: IdeaDraft }) {
+  return (
+    <div className="draft-preview-grid">
+      <div>
+        <span>Title</span>
+        <strong>{draft.title}</strong>
+      </div>
+      <div>
+        <span>Status / Priority / Progress</span>
+        <strong>
+          {statusMeta[draft.status].shortLabel} · {priorityMeta[draft.priority].label} · {draft.progress ?? 0}%
+        </strong>
+      </div>
+      <div>
+        <span>Tags</span>
+        <strong>{draft.tags.join(" / ")}</strong>
+      </div>
+      <div>
+        <span>Repositories</span>
+        <strong>{draft.repositories.length ? draft.repositories.map((repo) => repo.name || repo.urlOrPath).join(" / ") : "无"}</strong>
+      </div>
+      <div className="wide">
+        <span>Content</span>
+        <pre>{draft.content}</pre>
+      </div>
+      <div className="wide">
+        <span>Plan</span>
+        <pre>{draft.plan}</pre>
+      </div>
+      {draft.notes && (
+        <div className="wide">
+          <span>Notes</span>
+          <pre>{draft.notes}</pre>
+        </div>
+      )}
     </div>
   );
 }

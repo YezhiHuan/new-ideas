@@ -34,6 +34,19 @@ export interface Idea {
   notes?: string;
 }
 
+export interface IdeaDraft {
+  title: string;
+  content: string;
+  plan: string;
+  repositories: Omit<RelatedRepository, "id">[];
+  status: IdeaStatus;
+  tags: string[];
+  priority: Priority;
+  targetDate?: string;
+  progress?: number;
+  notes?: string;
+}
+
 export type ViewMode = "dashboard" | "list" | "board" | "settings";
 export type SortMode = "updated_desc" | "priority_desc" | "created_desc" | "title_asc";
 export type ThemeMode = "light" | "dark";
