@@ -344,19 +344,37 @@ async fn request_anthropic_idea(user_prompt: String, config: LlmConfig) -> Resul
 
 fn parse_idea_draft(text: &str) -> Result<IdeaDraft, String> {
     let json_text = extract_json_object(text).ok_or_else(|| "AI 返回内容中没有可解析的 JSON 对象。".to_string())?;
-    let mut draft: IdeaDraft =
-        serde_json::from_str(json_text).map_err(|error| format!("AI 返回 JSON 字段格式不正确：{}", error))?;
+    let raw: Value = serde_json::from_str(json_text).map_err(|error| {
+        eprintln!("AI idea raw JSON parse error: {}\nRaw text:\n{}", error, json_text);
+        "AI 返回的数据结构不符合预期，已尝试自动修复但失败。请重新生成，或检查模型是否支持严格 JSON 输出。".to_string()
+    })?;
+    normalize_idea_draft(raw).map_err(|error| {
+        eprintln!("AI idea normalize error: {}\nRaw JSON:\n{}", error, json_text);
+        "AI 返回的数据结构不符合预期，已尝试自动修复但失败。请重新生成，或检查模型是否支持严格 JSON 输出。".to_string()
+    })
+}
+
+fn normalize_idea_draft(raw: Value) -> Result<IdeaDraft, String> {
+    let object = raw
+        .as_object()
+        .ok_or_else(|| "AI 返回的 JSON 根节点不是对象。".to_string())?;
+
+    let mut draft = IdeaDraft {
+        title: value_to_string(object.get("title")).trim().to_string(),
+        content: value_to_string(object.get("content")).trim().to_string(),
+        plan: value_to_string(object.get("plan")).trim().to_string(),
+        repositories: normalize_repositories(object.get("repositories")),
+        status: normalize_status(object.get("status")),
+        tags: normalize_tags(object.get("tags")),
+        priority: normalize_priority(object.get("priority")),
+        target_date: normalize_target_date(object.get("targetDate")),
+        progress: Some(normalize_progress(object.get("progress"))),
+        notes: Some(value_to_string(object.get("notes")).trim().to_string()),
+    };
 
     draft.title = draft.title.trim().to_string();
     draft.content = draft.content.trim().to_string();
     draft.plan = draft.plan.trim().to_string();
-    draft.tags = draft
-        .tags
-        .into_iter()
-        .map(|tag| tag.trim().to_string())
-        .filter(|tag| !tag.is_empty())
-        .take(8)
-        .collect();
     draft.repositories = draft
         .repositories
         .into_iter()
@@ -369,6 +387,107 @@ fn parse_idea_draft(text: &str) -> Result<IdeaDraft, String> {
     }
 
     Ok(draft)
+}
+
+fn value_to_string(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .map(|item| match item {
+                Value::String(value) => value.clone(),
+                Value::Null => String::new(),
+                other => other.to_string(),
+            })
+            .filter(|item| !item.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Some(Value::Number(value)) => value.to_string(),
+        Some(Value::Bool(value)) => value.to_string(),
+        Some(Value::Object(value)) => serde_json::to_string_pretty(value).unwrap_or_default(),
+        Some(Value::Null) | None => String::new(),
+    }
+}
+
+fn normalize_tags(value: Option<&Value>) -> Vec<String> {
+    let tags = match value {
+        Some(Value::Array(values)) => values.iter().map(|item| value_to_string(Some(item))).collect::<Vec<_>>(),
+        Some(Value::String(value)) => value
+            .split([',', '，', '\n'])
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        Some(other) => vec![value_to_string(Some(other))],
+        None => Vec::new(),
+    };
+
+    tags.into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .take(8)
+        .collect()
+}
+
+fn normalize_repositories(value: Option<&Value>) -> Vec<RepositoryDraft> {
+    let Some(Value::Array(items)) = value else {
+        return Vec::new();
+    };
+
+    items
+        .iter()
+        .filter_map(|item| item.as_object())
+        .map(|repo| RepositoryDraft {
+            name: value_to_string(repo.get("name")),
+            repository_type: normalize_repository_type(repo.get("type")),
+            url_or_path: value_to_string(repo.get("urlOrPath").or_else(|| repo.get("url_or_path"))),
+            note: value_to_string(repo.get("note")),
+        })
+        .collect()
+}
+
+fn normalize_status(value: Option<&Value>) -> IdeaStatus {
+    match value_to_string(value).trim() {
+        "in_progress" => IdeaStatus::InProgress,
+        "completed" => IdeaStatus::Completed,
+        "abandoned" => IdeaStatus::Abandoned,
+        _ => IdeaStatus::NotStarted,
+    }
+}
+
+fn normalize_priority(value: Option<&Value>) -> Priority {
+    match value_to_string(value).trim() {
+        "low" => Priority::Low,
+        "high" => Priority::High,
+        _ => Priority::Medium,
+    }
+}
+
+fn normalize_repository_type(value: Option<&Value>) -> RepositoryType {
+    match value_to_string(value).trim() {
+        "local_folder" => RepositoryType::LocalFolder,
+        "local_file" => RepositoryType::LocalFile,
+        "github" => RepositoryType::Github,
+        "overleaf" => RepositoryType::Overleaf,
+        "pdf" => RepositoryType::Pdf,
+        "dataset" => RepositoryType::Dataset,
+        _ => RepositoryType::Other,
+    }
+}
+
+fn normalize_target_date(value: Option<&Value>) -> Option<String> {
+    let date = value_to_string(value).trim().to_string();
+    if date.is_empty() || date == "null" {
+        None
+    } else {
+        Some(date)
+    }
+}
+
+fn normalize_progress(value: Option<&Value>) -> u8 {
+    match value {
+        Some(Value::Number(number)) => number.as_u64().unwrap_or(0).min(100) as u8,
+        Some(Value::String(value)) => value.trim().parse::<u8>().unwrap_or(0).min(100),
+        _ => 0,
+    }
 }
 
 fn extract_json_object(text: &str) -> Option<&str> {
@@ -451,7 +570,32 @@ fn anthropic_model_presets() -> Vec<String> {
 }
 
 fn idea_system_prompt() -> &'static str {
-    "你是科研 idea 整理助手。必须只输出一个严格 JSON 对象，不要 Markdown，不要解释。JSON 字段必须为：title, content, plan, repositories, status, tags, priority, targetDate, progress, notes。content 要包含研究背景、核心问题、可能创新点、技术路线；plan 要给可执行步骤；tags 控制在 3-8 个；默认 status 为 not_started，除非用户明确表示已经开始；默认 progress 为 0；priority 默认 medium；repositories 可为空数组；notes 写风险、假设或待确认问题。repositories[].type 只能是 local_folder, local_file, github, overleaf, pdf, dataset, other。"
+    r#"你是科研 idea 整理助手。必须只输出一个严格 JSON 对象，不要 markdown code block，不要解释文字。
+字段类型必须完全一致：
+{
+  "title": "string",
+  "content": "string",
+  "plan": "string",
+  "repositories": [],
+  "status": "not_started",
+  "tags": ["string"],
+  "priority": "medium",
+  "targetDate": null,
+  "progress": 0,
+  "notes": "string"
+}
+类型规则：
+1. title 必须是 string，不要数组。
+2. content 必须是 string，不要数组。
+3. plan 必须是 string，不要数组。如果有多步计划，用 Markdown 编号列表字符串，例如 "1. 文献调研\n2. 数据收集\n3. 模型验证"。
+4. notes 必须是 string，不要数组。
+5. tags 必须是 string array，控制在 3-8 个。
+6. repositories 必须是 array；repositories[].type 只能是 local_folder, local_file, github, overleaf, pdf, dataset, other。
+7. progress 必须是 number，默认 0。
+8. targetDate 可以是 string 或 null。
+9. status 默认 not_started，除非用户明确表示已经开始。
+10. priority 默认 medium。
+content 要包含研究背景、核心问题、可能创新点、技术路线；plan 要给可执行步骤；notes 写风险、假设或待确认问题。"#
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -467,4 +611,52 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running NEW IDEAS");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_plan_and_notes_arrays() {
+        let raw = json!({
+            "title": "传感器噪声对转轮除湿模型辨识的影响",
+            "content": "研究传感器噪声对模型辨识稳定性的影响。",
+            "plan": ["文献调研", "建立噪声模型", "使用 UKF 进行估计", "实验验证"],
+            "repositories": [],
+            "status": "not_started",
+            "tags": ["转轮除湿", "UKF", "数据同化"],
+            "priority": "medium",
+            "progress": 0,
+            "notes": ["需要确认传感器采样频率", "需要真实运行数据"]
+        });
+
+        let draft = normalize_idea_draft(raw).expect("sample 1 should normalize");
+        assert_eq!(draft.plan, "文献调研\n建立噪声模型\n使用 UKF 进行估计\n实验验证");
+        assert_eq!(draft.notes.as_deref(), Some("需要确认传感器采样频率\n需要真实运行数据"));
+        assert_eq!(draft.tags, vec!["转轮除湿", "UKF", "数据同化"]);
+        assert_eq!(draft.progress, Some(0));
+    }
+
+    #[test]
+    fn normalizes_tags_string_content_array_and_progress_string() {
+        let raw = json!({
+            "title": "转轮除湿数据同化",
+            "content": ["研究背景", "核心问题", "创新点"],
+            "plan": "1. 调研\n2. 建模\n3. 验证",
+            "repositories": [],
+            "status": "in_progress",
+            "tags": "转轮除湿, UKF, 粒子滤波",
+            "priority": "high",
+            "progress": "0",
+            "notes": ""
+        });
+
+        let draft = normalize_idea_draft(raw).expect("sample 2 should normalize");
+        assert_eq!(draft.content, "研究背景\n核心问题\n创新点");
+        assert_eq!(draft.tags, vec!["转轮除湿", "UKF", "粒子滤波"]);
+        assert!(matches!(draft.status, IdeaStatus::InProgress));
+        assert!(matches!(draft.priority, Priority::High));
+        assert_eq!(draft.progress, Some(0));
+    }
 }
