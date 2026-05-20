@@ -619,7 +619,7 @@ function Dashboard({
           {recentIdeas.length === 0 && (
             <div className="recent-empty">
               <img src="/assets/empty-state.png" alt="" />
-              <strong>还没有科研 idea，创建你的第一个灵感。</strong>
+              <strong>还没有科研 idea，可创建第一个灵感。</strong>
               <span>可以手动新建，也可以用 AI 从一句自然语言描述开始整理。</span>
             </div>
           )}
@@ -646,7 +646,7 @@ function IdeaList({
     return (
       <section className="idea-list empty-panel">
         <img src="/assets/empty-state.png" alt="" />
-        <h2>还没有科研 idea，创建你的第一个灵感。</h2>
+        <h2>还没有科研 idea，可创建第一个灵感。</h2>
         <p>空列表会显示在这里。新建一个 idea 后，就可以持续补充内容、计划和文档仓库。</p>
         <button className="primary-button" onClick={onNewIdea}>
           <Plus size={18} />
@@ -1044,7 +1044,7 @@ function AIIdeaModal({
             value={input}
             onChange={(event) => setInput(event.target.value)}
             rows={6}
-            placeholder="例如：我想研究转轮除湿系统中传感器噪声对模型辨识的影响，可能用 UKF 或粒子滤波做数据同化。"
+            placeholder="例如：研究转轮除湿系统中传感器噪声对模型辨识的影响，可能用 UKF 或粒子滤波做数据同化。"
             autoFocus
           />
         </label>
