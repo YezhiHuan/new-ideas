@@ -5,7 +5,7 @@ use std::env;
 
 const DEFAULT_OPENAI_MODEL: &str = "gpt-4.1-mini";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-const MISSING_API_KEY_MESSAGE: &str = "未配置 OpenAI API Key，请先在环境变量或设置页中配置。";
+const MISSING_API_KEY_MESSAGE: &str = "未配置 OpenAI API Key，请先在 Settings Page 配置。";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +63,16 @@ struct IdeaDraft {
     notes: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LlmConfig {
+    #[serde(default)]
+    provider: String,
+    api_key: String,
+    base_url: String,
+    model: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenAIResponse {
     #[serde(default)]
@@ -84,7 +94,7 @@ struct ResponseContent {
 }
 
 #[tauri::command]
-async fn generate_idea_with_ai(input: String) -> Result<IdeaDraft, String> {
+async fn generate_idea_with_ai(input: String, config: LlmConfig) -> Result<IdeaDraft, String> {
     if input.trim().is_empty() {
         return Err("请输入科研 idea 描述后再生成。".to_string());
     }
@@ -93,39 +103,31 @@ async fn generate_idea_with_ai(input: String) -> Result<IdeaDraft, String> {
         "请把下面的自然语言科研想法整理成结构化 IdeaDraft JSON：\n\n{}",
         input.trim()
     );
-    request_idea_draft(user_prompt).await
+    request_idea_draft(user_prompt, config).await
 }
 
 #[tauri::command]
-async fn organize_idea_with_ai(input: IdeaDraft) -> Result<IdeaDraft, String> {
+async fn organize_idea_with_ai(input: IdeaDraft, config: LlmConfig) -> Result<IdeaDraft, String> {
     let user_prompt = format!(
         "请整理并增强下面这个科研 idea，保持用户已有意图，不要凭空加入已经完成的进展。返回结构化 IdeaDraft JSON。\n\n{}",
         serde_json::to_string_pretty(&input).map_err(|_| "无法序列化当前 idea。")?
     );
-    request_idea_draft(user_prompt).await
+    request_idea_draft(user_prompt, config).await
 }
 
-async fn request_idea_draft(user_prompt: String) -> Result<IdeaDraft, String> {
+async fn request_idea_draft(user_prompt: String, config: LlmConfig) -> Result<IdeaDraft, String> {
     dotenvy::dotenv().ok();
 
-    let api_key = env::var("OPENAI_API_KEY")
-        .map_err(|_| MISSING_API_KEY_MESSAGE.to_string())
-        .and_then(|key| {
-            let trimmed = key.trim().to_string();
-            if trimmed.is_empty() {
-                Err(MISSING_API_KEY_MESSAGE.to_string())
-            } else {
-                Ok(trimmed)
-            }
-        })?;
+    let api_key = config.api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err(MISSING_API_KEY_MESSAGE.to_string());
+    }
 
-    let model = env::var("OPENAI_MODEL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    let model = non_empty(config.model)
+        .or_else(|| env::var("OPENAI_MODEL").ok())
         .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
-    let base_url = env::var("OPENAI_BASE_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    let base_url = non_empty(config.base_url)
+        .or_else(|| env::var("OPENAI_BASE_URL").ok())
         .unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
     let endpoint = format!("{}/responses", base_url.trim_end_matches('/'));
 
@@ -155,6 +157,7 @@ async fn request_idea_draft(user_prompt: String) -> Result<IdeaDraft, String> {
     let response = client
         .post(endpoint)
         .bearer_auth(api_key)
+        .header("X-New-Ideas-Provider", non_empty(config.provider).unwrap_or_else(|| "openai_compatible".to_string()))
         .json(&payload)
         .send()
         .await
@@ -177,6 +180,15 @@ async fn request_idea_draft(user_prompt: String) -> Result<IdeaDraft, String> {
         serde_json::from_str(&body).map_err(|_| "OpenAI 返回了无法解析的响应。".to_string())?;
     let text = extract_response_text(parsed).ok_or_else(|| "OpenAI 返回中没有可用的 JSON 文本。".to_string())?;
     parse_idea_draft(&text)
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn extract_response_text(response: OpenAIResponse) -> Option<String> {

@@ -43,6 +43,7 @@ import type {
   Idea,
   IdeaDraft,
   IdeaStatus,
+  LlmSettings,
   Priority,
   RelatedRepository,
   RepositoryType,
@@ -304,9 +305,9 @@ export default function App() {
 
         {view === "settings" && (
           <SettingsPage
-            theme={settings.theme}
+            settings={settings}
             ideaCount={ideas.length}
-            onThemeChange={(theme) => setSettings((current) => ({ ...current, theme }))}
+            onSettingsChange={setSettings}
             onExport={() => exportIdeas(ideas)}
             onImport={() => importInputRef.current?.click()}
           />
@@ -317,6 +318,7 @@ export default function App() {
 
       {aiModalOpen && (
         <AIIdeaModal
+          llmSettings={settings.llm}
           onClose={() => setAiModalOpen(false)}
           onInsert={(draft) => {
             setEditingIdea(draftToIdea(draft));
@@ -328,6 +330,7 @@ export default function App() {
       {editingIdea && (
         <IdeaEditorModal
           idea={editingIdea}
+          llmSettings={settings.llm}
           onClose={() => setEditingIdea(null)}
           onSave={saveModalIdea}
         />
@@ -848,25 +851,29 @@ function IdeasBoard({
 }
 
 function SettingsPage({
-  theme,
+  settings,
   ideaCount,
-  onThemeChange,
+  onSettingsChange,
   onExport,
   onImport,
 }: {
-  theme: ThemeMode;
+  settings: AppSettings;
   ideaCount: number;
-  onThemeChange: (theme: ThemeMode) => void;
+  onSettingsChange: (settings: AppSettings) => void;
   onExport: () => void;
   onImport: () => void;
 }) {
+  const { theme, llm } = settings;
+  const updateTheme = (nextTheme: ThemeMode) => onSettingsChange({ ...settings, theme: nextTheme });
+  const updateLlm = (patch: Partial<LlmSettings>) => onSettingsChange({ ...settings, llm: { ...llm, ...patch } });
+
   return (
     <section className="settings-page">
       <div className="settings-card">
         <Database size={22} />
         <div>
           <h2>本地数据</h2>
-          <p>当前通过浏览器 localStorage 持久化，Tauri 桌面端离线可用。已保存 {ideaCount} 条 ideas。</p>
+          <p>当前通过 IndexedDB 持久化，Tauri 桌面端离线可用。已保存 {ideaCount} 条 ideas。</p>
         </div>
         <div className="settings-actions">
           <button className="ghost-button" onClick={onImport}>
@@ -887,23 +894,65 @@ function SettingsPage({
           <p>浅色适合白天阅读，深色适合长时间写作和夜间整理。</p>
         </div>
         <div className="segmented">
-          <button className={theme === "light" ? "active" : ""} onClick={() => onThemeChange("light")}>
+          <button className={theme === "light" ? "active" : ""} onClick={() => updateTheme("light")}>
             浅色
           </button>
-          <button className={theme === "dark" ? "active" : ""} onClick={() => onThemeChange("dark")}>
+          <button className={theme === "dark" ? "active" : ""} onClick={() => updateTheme("dark")}>
             深色
           </button>
         </div>
       </div>
 
-      <div className="settings-card">
+      <div className="settings-card settings-form-card">
         <Sparkles size={22} />
         <div>
-          <h2>AI 功能</h2>
-          <p>
-            AI 新建和 AI 整理通过 Rust Tauri command 调用 OpenAI Responses API。API Key 只从本机环境变量
-            OPENAI_API_KEY 读取，.env 不会提交到 GitHub。
-          </p>
+          <h2>LLM 配置</h2>
+          <p>AI 新建和 AI 整理通过 Tauri command 调用兼容 OpenAI Responses API 的服务。配置保存在本地工作区。</p>
+          <div className="settings-form-grid">
+            <label className="field">
+              <span>Provider</span>
+              <select value={llm.provider} onChange={(event) => updateLlm({ provider: event.target.value as LlmSettings["provider"] })}>
+                <option value="openai_compatible">OpenAI-compatible</option>
+                <option value="openai">OpenAI</option>
+                <option value="local">Local endpoint</option>
+                <option value="custom">Custom provider</option>
+              </select>
+            </label>
+            <label className="field">
+              <span>Model</span>
+              <input
+                list="model-options"
+                value={llm.model}
+                onChange={(event) => updateLlm({ model: event.target.value })}
+                placeholder="gpt-4.1-mini"
+              />
+              <datalist id="model-options">
+                <option value="gpt-4.1-mini" />
+                <option value="gpt-4.1" />
+                <option value="gpt-4o-mini" />
+                <option value="local-model" />
+              </datalist>
+            </label>
+            <label className="field wide">
+              <span>Base URL</span>
+              <input
+                value={llm.baseUrl}
+                onChange={(event) => updateLlm({ baseUrl: event.target.value })}
+                placeholder="https://api.openai.com/v1"
+              />
+            </label>
+            <label className="field wide">
+              <span>API Key</span>
+              <input
+                type="password"
+                value={llm.apiKey}
+                onChange={(event) => updateLlm({ apiKey: event.target.value })}
+                placeholder="sk-..."
+                autoComplete="off"
+              />
+            </label>
+          </div>
+          {!llm.apiKey.trim() && <p className="settings-warning">未配置 API Key 时，AI 新建和 AI 整理会显示配置提示。</p>}
         </div>
       </div>
 
@@ -918,7 +967,15 @@ function SettingsPage({
   );
 }
 
-function AIIdeaModal({ onClose, onInsert }: { onClose: () => void; onInsert: (draft: IdeaDraft) => void }) {
+function AIIdeaModal({
+  llmSettings,
+  onClose,
+  onInsert,
+}: {
+  llmSettings: LlmSettings;
+  onClose: () => void;
+  onInsert: (draft: IdeaDraft) => void;
+}) {
   const [input, setInput] = useState("");
   const [generatedDraft, setGeneratedDraft] = useState<IdeaDraft | null>(null);
   const [loading, setLoading] = useState(false);
@@ -932,7 +989,7 @@ function AIIdeaModal({ onClose, onInsert }: { onClose: () => void; onInsert: (dr
     setLoading(true);
     setError("");
     try {
-      setGeneratedDraft(await generateIdeaWithAI(input));
+      setGeneratedDraft(await generateIdeaWithAI(input, llmSettings));
     } catch (currentError) {
       setError(currentError instanceof Error ? currentError.message : String(currentError));
     } finally {
@@ -993,7 +1050,17 @@ function AIIdeaModal({ onClose, onInsert }: { onClose: () => void; onInsert: (dr
   );
 }
 
-function IdeaEditorModal({ idea, onClose, onSave }: { idea: Idea; onClose: () => void; onSave: (idea: Idea) => void }) {
+function IdeaEditorModal({
+  idea,
+  llmSettings,
+  onClose,
+  onSave,
+}: {
+  idea: Idea;
+  llmSettings: LlmSettings;
+  onClose: () => void;
+  onSave: (idea: Idea) => void;
+}) {
   const [draft, setDraft] = useState<Idea>(idea);
   const [tagsInput, setTagsInput] = useState(idea.tags.join(", "));
   const [aiLoading, setAiLoading] = useState(false);
@@ -1019,7 +1086,7 @@ function IdeaEditorModal({ idea, onClose, onSave }: { idea: Idea; onClose: () =>
     setAiLoading(true);
     setAiError("");
     try {
-      const result = await organizeIdeaWithAI(ideaToDraft({ ...draft, tags: normalizeTags(tagsInput) }));
+      const result = await organizeIdeaWithAI(ideaToDraft({ ...draft, tags: normalizeTags(tagsInput) }), llmSettings);
       setDraft(draftToIdea(result, draft));
       setTagsInput(result.tags.join(", "));
     } catch (currentError) {

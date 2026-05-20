@@ -1,13 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Idea, IdeaDraft, RelatedRepository } from "./types";
+import type { Idea, IdeaDraft, LlmSettings, RelatedRepository } from "./types";
 import { createId, normalizeTags } from "./utils";
 
-export async function generateIdeaWithAI(input: string) {
-  return sanitizeIdeaDraft(await invoke<IdeaDraft>("generate_idea_with_ai", { input }));
+const missingApiKeyMessage = "未配置 OpenAI API Key，请先在 Settings Page 配置。";
+
+export async function generateIdeaWithAI(input: string, settings: LlmSettings) {
+  const config = normalizeLlmSettings(settings);
+  return sanitizeIdeaDraft(await invoke<IdeaDraft>("generate_idea_with_ai", { input, config }));
 }
 
-export async function organizeIdeaWithAI(input: IdeaDraft) {
-  return sanitizeIdeaDraft(await invoke<IdeaDraft>("organize_idea_with_ai", { input }));
+export async function organizeIdeaWithAI(input: IdeaDraft, settings: LlmSettings) {
+  const config = normalizeLlmSettings(settings);
+  return sanitizeIdeaDraft(await invoke<IdeaDraft>("organize_idea_with_ai", { input, config }));
 }
 
 export function ideaToDraft(idea: Idea): IdeaDraft {
@@ -62,5 +66,16 @@ function sanitizeIdeaDraft(draft: IdeaDraft): IdeaDraft {
     targetDate: draft.targetDate || undefined,
     progress: Math.min(100, Math.max(0, Number(draft.progress ?? 0))),
     notes: draft.notes?.trim() || "",
+  };
+}
+
+function normalizeLlmSettings(settings: LlmSettings): LlmSettings {
+  const apiKey = settings.apiKey.trim();
+  if (!apiKey) throw new Error(missingApiKeyMessage);
+  return {
+    provider: settings.provider || "openai_compatible",
+    apiKey,
+    baseUrl: settings.baseUrl.trim() || "https://api.openai.com/v1",
+    model: settings.model.trim() || "gpt-4.1-mini",
   };
 }
