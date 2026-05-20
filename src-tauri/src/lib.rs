@@ -28,6 +28,7 @@ enum Priority {
 #[serde(rename_all = "snake_case")]
 enum RepositoryType {
     LocalFolder,
+    LocalFile,
     Github,
     Overleaf,
     Pdf,
@@ -264,7 +265,7 @@ fn idea_draft_schema() -> Value {
                         "name": { "type": "string" },
                         "type": {
                             "type": "string",
-                            "enum": ["local_folder", "github", "overleaf", "pdf", "dataset", "other"]
+                            "enum": ["local_folder", "local_file", "github", "overleaf", "pdf", "dataset", "other"]
                         },
                         "urlOrPath": { "type": "string" },
                         "note": { "type": "string" }
@@ -303,6 +304,7 @@ fn idea_draft_schema() -> Value {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             generate_idea_with_ai,
             organize_idea_with_ai

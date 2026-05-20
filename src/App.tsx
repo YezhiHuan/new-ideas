@@ -27,6 +27,8 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openShell } from "@tauri-apps/plugin-shell";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   emptyIdeaContent,
@@ -71,6 +73,20 @@ const blankRepository = (): RelatedRepository => ({
   urlOrPath: "",
   note: "",
 });
+
+const pathName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+const pathExtension = (path: string) => {
+  const name = pathName(path);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : undefined;
+};
+const repositoryTypeFromFile = (path: string): RepositoryType => {
+  const extension = pathExtension(path);
+  if (extension === "pdf") return "pdf";
+  if (["csv", "tsv", "json", "xlsx", "xls", "parquet", "h5", "hdf5", "nc"].includes(extension ?? "")) return "dataset";
+  return "local_file";
+};
+const normalizeDialogPath = (selected: string | string[] | null) => (Array.isArray(selected) ? selected[0] : selected);
 
 const createBlankIdea = (): Idea => {
   const now = new Date().toISOString();
@@ -214,11 +230,14 @@ export default function App() {
 
   function openRepository(repo: RelatedRepository) {
     if (/^https?:\/\//i.test(repo.urlOrPath)) {
-      window.open(repo.urlOrPath, "_blank", "noopener,noreferrer");
+      void openShell(repo.urlOrPath);
       return;
     }
+    if (repo.urlOrPath.trim()) void openShell(repo.urlOrPath);
+  }
+
+  function copyRepositoryPath(repo: RelatedRepository) {
     navigator.clipboard?.writeText(repo.urlOrPath);
-    window.alert("本地路径已复制。Tauri 文件夹直开能力已预留，后续可接 shell/open 插件。");
   }
 
   const shellClass = settings.theme === "dark" ? "theme-dark" : "theme-light";
@@ -299,6 +318,7 @@ export default function App() {
               onAbandon={(idea) => changeIdeaStatus(idea.id, "abandoned")}
               onStatusChange={changeIdeaStatus}
               onOpenRepository={openRepository}
+              onCopyRepository={copyRepositoryPath}
             />
           </section>
         )}
@@ -674,6 +694,7 @@ function IdeaDetail({
   onAbandon,
   onStatusChange,
   onOpenRepository,
+  onCopyRepository,
 }: {
   idea?: Idea;
   onEdit: (idea: Idea) => void;
@@ -681,6 +702,7 @@ function IdeaDetail({
   onAbandon: (idea: Idea) => void;
   onStatusChange: (id: string, status: IdeaStatus) => void;
   onOpenRepository: (repo: RelatedRepository) => void;
+  onCopyRepository: (repo: RelatedRepository) => void;
 }) {
   if (!idea) {
     return (
@@ -756,16 +778,22 @@ function IdeaDetail({
         ) : (
           <div className="repo-list">
             {idea.repositories.map((repo) => (
-              <button key={repo.id} className="repo-row" onClick={() => onOpenRepository(repo)}>
+              <div key={repo.id} className="repo-row">
                 <FolderOpen size={18} />
                 <div>
                   <strong>{repo.name || repo.urlOrPath}</strong>
                   <span>
                     {repositoryTypeLabels[repo.type]} · {repo.note || repo.urlOrPath}
+                    {repo.extension ? ` · .${repo.extension}` : ""}
                   </span>
                 </div>
-                {/https?:\/\//i.test(repo.urlOrPath) ? <ExternalLink size={17} /> : <ClipboardCopy size={17} />}
-              </button>
+                <button className="text-icon-button" title="打开" onClick={() => onOpenRepository(repo)}>
+                  {/https?:\/\//i.test(repo.urlOrPath) ? <ExternalLink size={17} /> : <FolderOpen size={17} />}
+                </button>
+                <button className="text-icon-button" title="复制路径" onClick={() => onCopyRepository(repo)}>
+                  <ClipboardCopy size={17} />
+                </button>
+              </div>
             ))}
           </div>
         )}
@@ -1077,6 +1105,40 @@ function IdeaEditorModal({
     }));
   }
 
+  async function addLocalFolder() {
+    const selected = normalizeDialogPath(await openDialog({ directory: true, multiple: false }));
+    if (!selected) return;
+    patch("repositories", [
+      ...draft.repositories,
+      {
+        id: createId("repo"),
+        name: pathName(selected),
+        type: "local_folder",
+        urlOrPath: selected,
+        note: "Local Folder",
+        indexedAt: new Date().toISOString(),
+      },
+    ]);
+  }
+
+  async function addLocalFile() {
+    const selected = normalizeDialogPath(await openDialog({ directory: false, multiple: false }));
+    if (!selected) return;
+    const extension = pathExtension(selected);
+    patch("repositories", [
+      ...draft.repositories,
+      {
+        id: createId("repo"),
+        name: pathName(selected),
+        type: repositoryTypeFromFile(selected),
+        urlOrPath: selected,
+        note: "Local File",
+        indexedAt: new Date().toISOString(),
+        extension,
+      },
+    ]);
+  }
+
   function submit(event: FormEvent) {
     event.preventDefault();
     onSave({ ...draft, tags: normalizeTags(tagsInput) });
@@ -1183,14 +1245,24 @@ function IdeaEditorModal({
         <section className="repo-editor">
           <div className="section-title compact">
             <h3>Related Document Repository</h3>
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => patch("repositories", [...draft.repositories, blankRepository()])}
-            >
-              <Plus size={16} />
-              添加
-            </button>
+            <div className="repo-editor-actions">
+              <button type="button" className="ghost-button" onClick={addLocalFolder}>
+                <FolderOpen size={16} />
+                选择文件夹
+              </button>
+              <button type="button" className="ghost-button" onClick={addLocalFile}>
+                <FileText size={16} />
+                选择文件
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => patch("repositories", [...draft.repositories, blankRepository()])}
+              >
+                <Plus size={16} />
+                添加 URL
+              </button>
+            </div>
           </div>
 
           {draft.repositories.map((repo) => (
@@ -1205,6 +1277,7 @@ function IdeaEditorModal({
               </select>
               <input value={repo.urlOrPath} onChange={(event) => patchRepository(repo.id, { urlOrPath: event.target.value })} placeholder="URL 或本地路径" />
               <input value={repo.note ?? ""} onChange={(event) => patchRepository(repo.id, { note: event.target.value })} placeholder="备注" />
+              <input value={repo.extension ?? ""} onChange={(event) => patchRepository(repo.id, { extension: event.target.value })} placeholder="扩展名" />
               <button
                 type="button"
                 className="danger-button icon-button"
