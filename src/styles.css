@@ -778,6 +778,60 @@ button:disabled {
   font-size: 13px;
 }
 
+.settings-note {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.secret-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  gap: 8px;
+}
+
+.secret-input input {
+  min-width: 0;
+}
+
+.llm-actions {
+  justify-content: flex-start;
+  margin-top: 14px;
+}
+
+.connection-result {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.connection-result.success {
+  border: 1px solid rgba(15, 118, 82, 0.2);
+  color: #0f7652;
+  background: rgba(15, 118, 82, 0.08);
+}
+
+.connection-result.failure {
+  border: 1px solid rgba(156, 47, 47, 0.2);
+  color: #9c2f2f;
+  background: rgba(156, 47, 47, 0.08);
+}
+
+.connection-result span {
+  overflow-wrap: anywhere;
+}
+
+.connection-result pre {
+  max-height: 160px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
 .settings-actions {
   display: flex;
   gap: 10px;

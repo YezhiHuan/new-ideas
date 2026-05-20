@@ -23,7 +23,7 @@ NEW IDEAS 是一个桌面端科研 idea 管理工具，用于记录、分类、�
 - Icons: lucide-react
 - Storage MVP: IndexedDB storage adapter
 - Desktop plugins: Tauri Dialog、Tauri Shell
-- AI: OpenAI Responses API / OpenAI-compatible endpoint via Tauri command
+- AI: OpenAI-compatible / OpenAI / Anthropic provider adapter via Tauri command
 
 ## 安装与运行
 
@@ -70,15 +70,25 @@ npm run tauri:build
 AI 功能通过以下路径调用：
 
 ```text
-React UI -> Tauri command -> Rust 后端 -> Responses API / OpenAI-compatible endpoint -> IdeaDraft JSON -> 前端表单
+React UI -> Tauri command -> Rust 后端 Provider Adapter -> IdeaDraft JSON -> 前端表单
 ```
 
 在 Settings Page 中配置：
 
-- Provider：默认 `OpenAI-compatible`
+- Provider：`OpenAI-compatible`、`OpenAI`、`Anthropic`
 - API Key
-- Base URL：默认 `https://api.openai.com/v1`
-- Model：默认 `gpt-4.1-mini`
+- Base URL
+- Model
+
+Provider 默认推荐使用 `OpenAI-compatible`。DeepSeek、硅基流动、本地 Ollama/OpenAI-compatible server 和第三方代理都统一走 `OpenAI-compatible`，不要作为单独 Provider。
+
+配置示例：
+
+- DeepSeek：Provider `OpenAI-compatible`，Base URL `https://api.deepseek.com`，Model 可通过“刷新模型列表”选择，或手动填写服务端支持的模型名。
+- OpenAI：Provider `OpenAI`，Base URL `https://api.openai.com/v1`。
+- Anthropic：Provider `Anthropic`，Base URL `https://api.anthropic.com`，Model 可使用预设 `claude-3-5-sonnet-latest`、`claude-3-5-haiku-latest`、`claude-3-opus-latest`，也可手动填写。
+
+OpenAI-compatible / OpenAI 的模型刷新会请求 `GET {baseUrl}/models`。连接测试会请求 `POST {baseUrl}/chat/completions`。Anthropic 连接测试会请求 `POST {baseUrl}/v1/messages`。
 
 `OPENAI_BASE_URL` 可用于 OpenAI-compatible endpoint、本地模型服务或第三方兼容接口。AI 生成结果只会填入 New / Edit Idea 表单，不会自动保存，必须由用户确认后写入本地工作区。
 

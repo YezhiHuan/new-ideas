@@ -8,6 +8,8 @@ import {
   Database,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileText,
   Filter,
   FolderOpen,
@@ -18,6 +20,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  RefreshCw,
   Search,
   Settings,
   Sparkles,
@@ -38,7 +41,7 @@ import {
   statusMeta,
   statusOrder,
 } from "./constants";
-import { draftToIdea, generateIdeaWithAI, ideaToDraft, organizeIdeaWithAI } from "./ai";
+import { draftToIdea, fetchLlmModels, generateIdeaWithAI, ideaToDraft, organizeIdeaWithAI, testLlmConnection } from "./ai";
 import { defaultSettings, exportIdeas, importIdeasFromFile, loadAppData, saveIdeas, saveSettings } from "./storage";
 import type {
   AppSettings,
@@ -50,6 +53,7 @@ import type {
   RelatedRepository,
   RepositoryType,
   SortMode,
+  TestConnectionResult,
   ThemeMode,
   ViewMode,
 } from "./types";
@@ -87,6 +91,38 @@ const repositoryTypeFromFile = (path: string): RepositoryType => {
   return "local_file";
 };
 const normalizeDialogPath = (selected: string | string[] | null) => (Array.isArray(selected) ? selected[0] : selected);
+
+const providerBaseUrls: Record<LlmSettings["provider"], string> = {
+  "openai-compatible": "https://api.openai.com/v1",
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com",
+};
+
+const providerDefaultModels: Record<LlmSettings["provider"], string> = {
+  "openai-compatible": "gpt-4.1-mini",
+  openai: "gpt-4.1-mini",
+  anthropic: "claude-3-5-sonnet-latest",
+};
+
+const anthropicModelPresets = [
+  "claude-3-5-sonnet-latest",
+  "claude-3-5-haiku-latest",
+  "claude-3-opus-latest",
+];
+
+const openAiModelPresets = ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"];
+
+function defaultModelOptions(provider: LlmSettings["provider"]) {
+  return provider === "anthropic" ? anthropicModelPresets : openAiModelPresets;
+}
+
+function validateLlmSettings(settings: LlmSettings, options: { requireModel: boolean }) {
+  if (!settings.provider) return "请选择 Provider。";
+  if (!settings.baseUrl.trim()) return "请填写 Base URL。";
+  if (!settings.apiKey.trim()) return "请填写 API Key。";
+  if (options.requireModel && !settings.model.trim()) return "请填写或选择 Model。";
+  return "";
+}
 
 const createBlankIdea = (): Idea => {
   const now = new Date().toISOString();
@@ -892,8 +928,92 @@ function SettingsPage({
   onImport: () => void;
 }) {
   const { theme, llm } = settings;
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>(() => defaultModelOptions(llm.provider));
+  const [modelListMessage, setModelListMessage] = useState("");
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [testLoading, setTestLoading] = useState(false);
+  const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
   const updateTheme = (nextTheme: ThemeMode) => onSettingsChange({ ...settings, theme: nextTheme });
   const updateLlm = (patch: Partial<LlmSettings>) => onSettingsChange({ ...settings, llm: { ...llm, ...patch } });
+
+  useEffect(() => {
+    setModelOptions(defaultModelOptions(llm.provider));
+    setModelListMessage("");
+    setTestResult(null);
+  }, [llm.provider]);
+
+  function changeProvider(provider: LlmSettings["provider"]) {
+    onSettingsChange({
+      ...settings,
+      llm: {
+        ...llm,
+        provider,
+        baseUrl: providerBaseUrls[provider],
+        model: providerDefaultModels[provider],
+      },
+    });
+  }
+
+  async function refreshModels() {
+    setModelListMessage("");
+    setTestResult(null);
+    if (llm.provider === "anthropic") {
+      setModelOptions(anthropicModelPresets);
+      setModelListMessage("Anthropic 使用常见模型预设，也支持手动输入模型名。");
+      if (!llm.model.trim()) updateLlm({ model: anthropicModelPresets[0] });
+      return;
+    }
+
+    const validation = validateLlmSettings(llm, { requireModel: false });
+    if (validation) {
+      setModelListMessage(validation);
+      return;
+    }
+
+    setModelsLoading(true);
+    try {
+      const models = await fetchLlmModels(llm);
+      setModelOptions(models);
+      setModelListMessage(`已刷新 ${models.length} 个模型。`);
+      if (!llm.model.trim() && models[0]) updateLlm({ model: models[0] });
+    } catch (error) {
+      setModelListMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setModelsLoading(false);
+    }
+  }
+
+  async function testConnection() {
+    const validation = validateLlmSettings(llm, { requireModel: true });
+    if (validation) {
+      setTestResult({
+        ok: false,
+        provider: llm.provider,
+        baseUrl: llm.baseUrl,
+        model: llm.model,
+        message: validation,
+      });
+      return;
+    }
+
+    setTestLoading(true);
+    setTestResult(null);
+    try {
+      setTestResult(await testLlmConnection(llm));
+    } catch (error) {
+      setTestResult({
+        ok: false,
+        provider: llm.provider,
+        baseUrl: llm.baseUrl,
+        model: llm.model,
+        message: "连接测试失败。",
+        rawError: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setTestLoading(false);
+    }
+  }
 
   return (
     <section className="settings-page">
@@ -935,15 +1055,14 @@ function SettingsPage({
         <Sparkles size={22} />
         <div>
           <h2>LLM 配置</h2>
-          <p>AI 新建和 AI 整理通过 Tauri command 调用兼容 OpenAI Responses API 的服务。配置保存在本地工作区。</p>
+          <p>AI 新建和 AI 整理通过 Tauri command 调用 LLM Provider。配置保存在本地工作区。</p>
           <div className="settings-form-grid">
             <label className="field">
               <span>Provider</span>
-              <select value={llm.provider} onChange={(event) => updateLlm({ provider: event.target.value as LlmSettings["provider"] })}>
-                <option value="openai_compatible">OpenAI-compatible</option>
+              <select value={llm.provider} onChange={(event) => changeProvider(event.target.value as LlmSettings["provider"])}>
+                <option value="openai-compatible">OpenAI-compatible</option>
                 <option value="openai">OpenAI</option>
-                <option value="local">Local endpoint</option>
-                <option value="custom">Custom provider</option>
+                <option value="anthropic">Anthropic</option>
               </select>
             </label>
             <label className="field">
@@ -955,10 +1074,9 @@ function SettingsPage({
                 placeholder="gpt-4.1-mini"
               />
               <datalist id="model-options">
-                <option value="gpt-4.1-mini" />
-                <option value="gpt-4.1" />
-                <option value="gpt-4o-mini" />
-                <option value="local-model" />
+                {modelOptions.map((model) => (
+                  <option key={model} value={model} />
+                ))}
               </datalist>
             </label>
             <label className="field wide">
@@ -971,16 +1089,45 @@ function SettingsPage({
             </label>
             <label className="field wide">
               <span>API Key</span>
-              <input
-                type="password"
-                value={llm.apiKey}
-                onChange={(event) => updateLlm({ apiKey: event.target.value })}
-                placeholder="sk-..."
-                autoComplete="off"
-              />
+              <div className="secret-input">
+                <input
+                  type={showApiKey ? "text" : "password"}
+                  value={llm.apiKey}
+                  onChange={(event) => updateLlm({ apiKey: event.target.value })}
+                  placeholder="API Key"
+                  autoComplete="off"
+                />
+                <button type="button" className="text-icon-button" title={showApiKey ? "隐藏 API Key" : "显示 API Key"} onClick={() => setShowApiKey((value) => !value)}>
+                  {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
             </label>
           </div>
+          {llm.provider === "openai-compatible" && (
+            <p className="settings-note">DeepSeek、本地模型服务和第三方 OpenAI-compatible API 都可使用该模式。</p>
+          )}
           {!llm.apiKey.trim() && <p className="settings-warning">未配置 API Key 时，AI 新建和 AI 整理会显示配置提示。</p>}
+          <div className="settings-actions llm-actions">
+            <button className="ghost-button" onClick={refreshModels} disabled={modelsLoading}>
+              <RefreshCw size={18} />
+              {modelsLoading ? "刷新中..." : "刷新模型列表"}
+            </button>
+            <button className="primary-button" onClick={testConnection} disabled={testLoading}>
+              <Sparkles size={18} />
+              {testLoading ? "测试中..." : "测试连接"}
+            </button>
+          </div>
+          {modelListMessage && <p className="settings-note">{modelListMessage}</p>}
+          {testResult && (
+            <div className={`connection-result ${testResult.ok ? "success" : "failure"}`}>
+              <strong>{testResult.ok ? "连接成功，模型可用。" : testResult.message}</strong>
+              <span>
+                {testResult.provider} · {testResult.baseUrl} · {testResult.model || "未选择模型"}
+              </span>
+              {!testResult.ok && testResult.statusCode && <span>Status: {testResult.statusCode}</span>}
+              {!testResult.ok && testResult.rawError && <pre>{testResult.rawError}</pre>}
+            </div>
+          )}
         </div>
       </div>
 

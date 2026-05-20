@@ -51,13 +51,23 @@ export interface IdeaDraft {
   notes?: string;
 }
 
-export type LlmProvider = "openai_compatible" | "openai" | "local" | "custom";
+export type LlmProvider = "openai-compatible" | "openai" | "anthropic";
 
 export interface LlmSettings {
   provider: LlmProvider;
+  baseUrl: string;
   apiKey: string;
+  model: string;
+}
+
+export interface TestConnectionResult {
+  ok: boolean;
+  provider: string;
   baseUrl: string;
   model: string;
+  message: string;
+  statusCode?: number;
+  rawError?: string;
 }
 
 export interface AppSettings {

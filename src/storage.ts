@@ -14,9 +14,9 @@ const SETTINGS_KEY = "app";
 export const defaultSettings: AppSettings = {
   theme: "light",
   llm: {
-    provider: "openai_compatible",
-    apiKey: "",
+    provider: "openai-compatible",
     baseUrl: "https://api.openai.com/v1",
+    apiKey: "",
     model: "gpt-4.1-mini",
   },
 };
@@ -192,14 +192,22 @@ class IndexedDbStorageAdapter implements StorageAdapter {
 }
 
 function mergeSettings(settings?: Partial<AppSettings>): AppSettings {
+  const llm = settings?.llm;
   return {
     ...defaultSettings,
     ...settings,
     llm: {
       ...defaultSettings.llm,
-      ...settings?.llm,
+      ...llm,
+      provider: normalizeProvider(llm?.provider),
     },
   };
+}
+
+function normalizeProvider(provider?: string) {
+  if (provider === "openai") return "openai";
+  if (provider === "anthropic") return "anthropic";
+  return "openai-compatible";
 }
 
 function readLegacyIdeas() {

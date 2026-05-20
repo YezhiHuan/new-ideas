@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Idea, IdeaDraft, LlmSettings, RelatedRepository } from "./types";
+import type { Idea, IdeaDraft, LlmSettings, RelatedRepository, TestConnectionResult } from "./types";
 import { createId, normalizeTags } from "./utils";
 
-const missingApiKeyMessage = "未配置 OpenAI API Key，请先在 Settings Page 配置。";
+const missingApiKeyMessage = "未配置 API Key，请先在 Settings Page 配置。";
 
 export async function generateIdeaWithAI(input: string, settings: LlmSettings) {
   const config = normalizeLlmSettings(settings);
@@ -12,6 +12,16 @@ export async function generateIdeaWithAI(input: string, settings: LlmSettings) {
 export async function organizeIdeaWithAI(input: IdeaDraft, settings: LlmSettings) {
   const config = normalizeLlmSettings(settings);
   return sanitizeIdeaDraft(await invoke<IdeaDraft>("organize_idea_with_ai", { input, config }));
+}
+
+export async function fetchLlmModels(settings: LlmSettings) {
+  const config = normalizeLlmSettings(settings, { allowMissingModel: true });
+  return invoke<string[]>("fetch_llm_models", { config });
+}
+
+export async function testLlmConnection(settings: LlmSettings) {
+  const config = normalizeLlmSettings(settings);
+  return invoke<TestConnectionResult>("test_llm_connection", { config });
 }
 
 export function ideaToDraft(idea: Idea): IdeaDraft {
@@ -72,13 +82,19 @@ function sanitizeIdeaDraft(draft: IdeaDraft): IdeaDraft {
   };
 }
 
-function normalizeLlmSettings(settings: LlmSettings): LlmSettings {
+function normalizeLlmSettings(settings: LlmSettings, options?: { allowMissingModel?: boolean }): LlmSettings {
+  const provider = settings.provider || "openai-compatible";
+  if (!provider) throw new Error("请选择 Provider。");
+  const baseUrl = settings.baseUrl.trim();
+  if (!baseUrl) throw new Error("请填写 Base URL。");
   const apiKey = settings.apiKey.trim();
   if (!apiKey) throw new Error(missingApiKeyMessage);
+  const model = settings.model.trim();
+  if (!model && !options?.allowMissingModel) throw new Error("请填写或选择 Model。");
   return {
-    provider: settings.provider || "openai_compatible",
+    provider,
+    baseUrl,
     apiKey,
-    baseUrl: settings.baseUrl.trim() || "https://api.openai.com/v1",
-    model: settings.model.trim() || "gpt-4.1-mini",
+    model,
   };
 }
