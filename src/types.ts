@@ -4,6 +4,7 @@ export type Priority = "low" | "medium" | "high";
 
 export type RepositoryType =
   | "local_folder"
+  | "local_file"
   | "github"
   | "overleaf"
   | "pdf"
@@ -16,6 +17,9 @@ export interface RelatedRepository {
   type: RepositoryType;
   urlOrPath: string;
   note?: string;
+  indexedAt?: string;
+  fileSize?: number;
+  extension?: string;
 }
 
 export interface Idea {
@@ -45,6 +49,31 @@ export interface IdeaDraft {
   targetDate?: string;
   progress?: number;
   notes?: string;
+}
+
+export type LlmProvider = "openai_compatible" | "openai" | "local" | "custom";
+
+export interface LlmSettings {
+  provider: LlmProvider;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
+export interface AppSettings {
+  theme: ThemeMode;
+  llm: LlmSettings;
+}
+
+export interface StorageMigrationState {
+  localStorageV1Completed: boolean;
+  completedAt?: string;
+}
+
+export interface AppData {
+  ideas: Idea[];
+  settings: AppSettings;
+  migration: StorageMigrationState;
 }
 
 export type ViewMode = "dashboard" | "list" | "board" | "settings";

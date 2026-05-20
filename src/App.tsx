@@ -37,8 +37,19 @@ import {
   statusOrder,
 } from "./constants";
 import { draftToIdea, generateIdeaWithAI, ideaToDraft, organizeIdeaWithAI } from "./ai";
-import { exportIdeas, importIdeasFromFile, loadIdeas, loadTheme, saveIdeas, saveTheme } from "./storage";
-import type { Idea, IdeaDraft, IdeaStatus, Priority, RelatedRepository, RepositoryType, SortMode, ThemeMode, ViewMode } from "./types";
+import { defaultSettings, exportIdeas, importIdeasFromFile, loadAppData, saveIdeas, saveSettings } from "./storage";
+import type {
+  AppSettings,
+  Idea,
+  IdeaDraft,
+  IdeaStatus,
+  Priority,
+  RelatedRepository,
+  RepositoryType,
+  SortMode,
+  ThemeMode,
+  ViewMode,
+} from "./types";
 import {
   createId,
   formatDate,
@@ -78,20 +89,45 @@ const createBlankIdea = (): Idea => {
 };
 
 export default function App() {
-  const [ideas, setIdeas] = useState<Idea[]>(() => loadIdeas());
-  const [theme, setTheme] = useState<ThemeMode>(() => loadTheme());
+  const [ideas, setIdeas] = useState<Idea[]>([]);
+  const [settings, setSettings] = useState<AppSettings>(defaultSettings);
+  const [storageReady, setStorageReady] = useState(false);
   const [view, setView] = useState<ViewMode>("dashboard");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [tagFilter, setTagFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("updated_desc");
-  const [selectedId, setSelectedId] = useState(() => loadIdeas()[0]?.id ?? "");
+  const [selectedId, setSelectedId] = useState("");
   const [editingIdea, setEditingIdea] = useState<Idea | null>(null);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => saveIdeas(ideas), [ideas]);
-  useEffect(() => saveTheme(theme), [theme]);
+  useEffect(() => {
+    let active = true;
+    loadAppData()
+      .then((data) => {
+        if (!active) return;
+        setIdeas(data.ideas);
+        setSettings(data.settings);
+        setSelectedId(data.ideas[0]?.id ?? "");
+        setStorageReady(true);
+      })
+      .catch((error) => {
+        window.alert(error instanceof Error ? error.message : "读取本地工作区失败。");
+        setStorageReady(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (storageReady) void saveIdeas(ideas);
+  }, [ideas, storageReady]);
+
+  useEffect(() => {
+    if (storageReady) void saveSettings(settings);
+  }, [settings, storageReady]);
 
   const allTags = useMemo(
     () => Array.from(new Set(ideas.flatMap((idea) => idea.tags))).sort((a, b) => a.localeCompare(b, "zh-CN")),
@@ -184,7 +220,7 @@ export default function App() {
     window.alert("本地路径已复制。Tauri 文件夹直开能力已预留，后续可接 shell/open 插件。");
   }
 
-  const shellClass = theme === "dark" ? "theme-dark" : "theme-light";
+  const shellClass = settings.theme === "dark" ? "theme-dark" : "theme-light";
 
   return (
     <main className={`app-shell ${shellClass}`}>
@@ -268,9 +304,9 @@ export default function App() {
 
         {view === "settings" && (
           <SettingsPage
-            theme={theme}
+            theme={settings.theme}
             ideaCount={ideas.length}
-            onThemeChange={setTheme}
+            onThemeChange={(theme) => setSettings((current) => ({ ...current, theme }))}
             onExport={() => exportIdeas(ideas)}
             onImport={() => importInputRef.current?.click()}
           />

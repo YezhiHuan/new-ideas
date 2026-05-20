@@ -61,6 +61,7 @@ export const priorityMeta: Record<Priority, { label: string; weight: number; chi
 
 export const repositoryTypeLabels: Record<RepositoryType, string> = {
   local_folder: "本地文件夹",
+  local_file: "本地文件",
   github: "GitHub",
   overleaf: "Overleaf",
   pdf: "PDF",
