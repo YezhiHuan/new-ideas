@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Idea, IdeaDraft, LlmSettings, RelatedRepository, TestConnectionResult } from "./types";
-import { createId, normalizeTags } from "./utils";
+import type { DailyTodo, Idea, IdeaDraft, LlmSettings, RelatedRepository, TestConnectionResult, TodoDraft } from "./types";
+import { calculateTodoProgress, createId, normalizeTags, normalizeTodoDrafts } from "./utils";
 
 const missingApiKeyMessage = "未配置 API Key，请先在 Settings Page 配置。";
 
@@ -24,11 +24,44 @@ export async function testLlmConnection(settings: LlmSettings) {
   return invoke<TestConnectionResult>("test_llm_connection", { config });
 }
 
+export async function generateProjectTodosWithAI(idea: Pick<Idea, "title" | "content" | "plan" | "notes">, settings: LlmSettings) {
+  const config = normalizeLlmSettings(settings);
+  const result = await invoke<{ todos: TodoDraft[] }>("generate_project_todos_with_ai", { input: idea, config });
+  return normalizeDraftTodos(result.todos);
+}
+
+export async function generateDailyTodosWithAI(input: string, date: string, settings: LlmSettings) {
+  const config = normalizeLlmSettings(settings);
+  const result = await invoke<{ todos: TodoDraft[] }>("generate_daily_todos_with_ai", { input, date, config });
+  return normalizeDraftTodos(result.todos);
+}
+
+export function draftTodosToDailyTodos(drafts: TodoDraft[], date: string, startOrder = 0): DailyTodo[] {
+  const now = new Date().toISOString();
+  return normalizeDraftTodos(drafts).map((todo, index) => {
+    const status = todo.status ?? "todo";
+    return {
+      id: createId("daily"),
+      title: todo.title,
+      description: todo.description || undefined,
+      status,
+      priority: todo.priority ?? "medium",
+      date,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: status === "done" ? now : undefined,
+      tags: normalizeTags(todo.tags ?? []),
+      order: startOrder + index,
+    };
+  });
+}
+
 export function ideaToDraft(idea: Idea): IdeaDraft {
   return {
     title: idea.title,
     content: idea.content,
     plan: idea.plan,
+    todos: idea.todos.map(({ id: _id, createdAt: _createdAt, updatedAt: _updatedAt, completedAt: _completedAt, order: _order, ...todo }) => todo),
     repositories: idea.repositories.map(({ id: _id, ...repo }) => repo),
     status: idea.status,
     tags: idea.tags,
@@ -41,11 +74,13 @@ export function ideaToDraft(idea: Idea): IdeaDraft {
 
 export function draftToIdea(draft: IdeaDraft, baseIdea?: Idea): Idea {
   const now = new Date().toISOString();
+  const todos = normalizeTodoDrafts(draft.todos, baseIdea?.todos);
   return {
     id: baseIdea?.id ?? createId("idea"),
     title: draft.title.trim(),
     content: draft.content.trim(),
     plan: draft.plan.trim(),
+    todos,
     repositories: draft.repositories.map((repo, index): RelatedRepository => ({
       id: baseIdea?.repositories[index]?.id ?? createId("repo"),
       name: repo.name.trim(),
@@ -60,7 +95,7 @@ export function draftToIdea(draft: IdeaDraft, baseIdea?: Idea): Idea {
     tags: normalizeTags(draft.tags),
     priority: draft.priority,
     targetDate: draft.targetDate || undefined,
-    progress: Math.min(100, Math.max(0, Number(draft.progress ?? 0))),
+    progress: calculateTodoProgress(todos),
     notes: draft.notes?.trim() || undefined,
     createdAt: baseIdea?.createdAt ?? now,
     updatedAt: baseIdea?.updatedAt ?? now,
@@ -72,6 +107,7 @@ function sanitizeIdeaDraft(draft: IdeaDraft): IdeaDraft {
     title: draft.title?.trim() || "未命名科研 idea",
     content: draft.content?.trim() || "",
     plan: draft.plan?.trim() || "",
+    todos: normalizeDraftTodos(Array.isArray(draft.todos) ? draft.todos : []),
     repositories: Array.isArray(draft.repositories) ? draft.repositories : [],
     status: draft.status || "not_started",
     tags: normalizeTags(Array.isArray(draft.tags) ? draft.tags : []),
@@ -80,6 +116,19 @@ function sanitizeIdeaDraft(draft: IdeaDraft): IdeaDraft {
     progress: Math.min(100, Math.max(0, Number(draft.progress ?? 0))),
     notes: draft.notes?.trim() || "",
   };
+}
+
+function normalizeDraftTodos(todos: IdeaDraft["todos"]): IdeaDraft["todos"] {
+  return todos
+    .filter((todo) => todo?.title?.trim())
+    .map((todo) => ({
+      title: todo.title.trim(),
+      description: todo.description?.trim() || "",
+      status: todo.status === "in_progress" || todo.status === "done" || todo.status === "cancelled" ? todo.status : "todo",
+      priority: todo.priority === "low" || todo.priority === "high" ? todo.priority : "medium",
+      dueDate: todo.dueDate || undefined,
+      tags: normalizeTags(todo.tags ?? []),
+    }));
 }
 
 function normalizeLlmSettings(settings: LlmSettings, options?: { allowMissingModel?: boolean }): LlmSettings {

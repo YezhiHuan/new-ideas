@@ -1,7 +1,10 @@
 import {
   Archive,
+  ArrowDown,
   ArrowDownAZ,
+  ArrowUp,
   Calendar,
+  CalendarDays,
   Check,
   ChevronRight,
   ClipboardCopy,
@@ -14,13 +17,16 @@ import {
   Filter,
   FolderOpen,
   Home,
+  Languages,
   Layers3,
   Link2,
+  ListTodo,
   Moon,
   MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   Settings,
   Sparkles,
@@ -32,6 +38,7 @@ import {
 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { open as openShell } from "@tauri-apps/plugin-shell";
+import { invoke } from "@tauri-apps/api/core";
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   emptyIdeaContent,
@@ -41,10 +48,24 @@ import {
   statusMeta,
   statusOrder,
 } from "./constants";
-import { draftToIdea, fetchLlmModels, generateIdeaWithAI, ideaToDraft, organizeIdeaWithAI, testLlmConnection } from "./ai";
-import { defaultSettings, exportIdeas, importIdeasFromFile, loadAppData, saveIdeas, saveSettings } from "./storage";
+import {
+  draftToIdea,
+  draftTodosToDailyTodos,
+  fetchLlmModels,
+  generateDailyTodosWithAI,
+  generateIdeaWithAI,
+  generateProjectTodosWithAI,
+  ideaToDraft,
+  organizeIdeaWithAI,
+  testLlmConnection,
+} from "./ai";
+import { createTranslator, I18nProvider, useI18n } from "./i18n";
+import { defaultSettings, exportIdeas, importIdeasFromFile, loadAppData, saveDailyTodos, saveIdeas, saveSettings } from "./storage";
 import type {
+  AppMode,
   AppSettings,
+  DailyTodo,
+  DailyTodoStatus,
   Idea,
   IdeaDraft,
   IdeaStatus,
@@ -55,20 +76,41 @@ import type {
   SortMode,
   TestConnectionResult,
   ThemeMode,
+  TodoItem,
+  TodoDraft,
+  TodoStatus,
   ViewMode,
 } from "./types";
 import {
+  calculateTodoProgress,
   createId,
   formatDate,
   formatDateOnly,
+  matchesDailyTodo,
   matchesIdea,
+  normalizePriority,
   nextStatus,
   normalizeTags,
+  normalizeTodoStatus,
+  projectTodoFromDailyTodo,
+  sortDailyTodos,
   sortIdeas,
   summarizeMarkdown,
+  todayDateKey,
+  todoCompletionSummary,
+  withCalculatedIdeaProgress,
 } from "./utils";
 
 type StatusFilter = IdeaStatus | "all";
+
+const todoStatusMeta: Record<TodoStatus, { label: string; shortLabel: string; className: string }> = {
+  todo: { label: "To Do", shortLabel: "待办", className: "todo" },
+  in_progress: { label: "In Progress", shortLabel: "进行中", className: "in-progress" },
+  done: { label: "Done", shortLabel: "完成", className: "done" },
+  cancelled: { label: "Cancelled", shortLabel: "取消", className: "cancelled" },
+};
+
+const todoStatusOrder: TodoStatus[] = ["todo", "in_progress", "done", "cancelled"];
 
 const blankRepository = (): RelatedRepository => ({
   id: createId("repo"),
@@ -131,6 +173,7 @@ const createBlankIdea = (): Idea => {
     title: "",
     content: emptyIdeaContent,
     plan: emptyIdeaPlan,
+    todos: [],
     repositories: [],
     status: "not_started",
     tags: [],
@@ -141,19 +184,54 @@ const createBlankIdea = (): Idea => {
   };
 };
 
+const createBlankProjectTodo = (order: number): TodoItem => {
+  const now = new Date().toISOString();
+  return {
+    id: createId("todo"),
+    title: "",
+    description: "",
+    status: "todo",
+    priority: "medium",
+    createdAt: now,
+    updatedAt: now,
+    order,
+  };
+};
+
+const createBlankDailyTodo = (date: string, order: number): DailyTodo => {
+  const now = new Date().toISOString();
+  return {
+    id: createId("daily"),
+    title: "",
+    description: "",
+    status: "todo",
+    priority: "medium",
+    date,
+    createdAt: now,
+    updatedAt: now,
+    tags: [],
+    order,
+  };
+};
+
 export default function App() {
   const [ideas, setIdeas] = useState<Idea[]>([]);
+  const [dailyTodos, setDailyTodos] = useState<DailyTodo[]>([]);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [storageReady, setStorageReady] = useState(false);
+  const [appMode, setAppMode] = useState<AppMode>("research");
   const [view, setView] = useState<ViewMode>("dashboard");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [tagFilter, setTagFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("updated_desc");
   const [selectedId, setSelectedId] = useState("");
+  const [selectedDailyDate, setSelectedDailyDate] = useState(todayDateKey());
   const [editingIdea, setEditingIdea] = useState<Idea | null>(null);
+  const [editingDailyTodo, setEditingDailyTodo] = useState<DailyTodo | null>(null);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const t = useMemo(() => createTranslator(settings.language), [settings.language]);
 
   useEffect(() => {
     let active = true;
@@ -161,6 +239,7 @@ export default function App() {
       .then((data) => {
         if (!active) return;
         setIdeas(data.ideas);
+        setDailyTodos(data.dailyTodos);
         setSettings(data.settings);
         setSelectedId(data.ideas[0]?.id ?? "");
         setStorageReady(true);
@@ -177,6 +256,10 @@ export default function App() {
   useEffect(() => {
     if (storageReady) void saveIdeas(ideas);
   }, [ideas, storageReady]);
+
+  useEffect(() => {
+    if (storageReady) void saveDailyTodos(dailyTodos);
+  }, [dailyTodos, storageReady]);
 
   useEffect(() => {
     if (storageReady) void saveSettings(settings);
@@ -208,8 +291,19 @@ export default function App() {
 
   const recentIdeas = useMemo(() => sortIdeas(ideas, "updated_desc").slice(0, 5), [ideas]);
 
+  const dailyTodoTags = useMemo(
+    () => Array.from(new Set(dailyTodos.flatMap((todo) => todo.tags))).sort((a, b) => a.localeCompare(b, "zh-CN")),
+    [dailyTodos],
+  );
+
+  function changeAppMode(mode: AppMode) {
+    setAppMode(mode);
+    setView(mode === "research" ? "dashboard" : "daily");
+    setQuery("");
+  }
+
   function updateIdea(updatedIdea: Idea) {
-    const ideaWithTimestamp = { ...updatedIdea, updatedAt: new Date().toISOString() };
+    const ideaWithTimestamp = withCalculatedIdeaProgress({ ...updatedIdea, updatedAt: new Date().toISOString() });
     setIdeas((current) => current.map((idea) => (idea.id === ideaWithTimestamp.id ? ideaWithTimestamp : idea)));
     setSelectedId(ideaWithTimestamp.id);
   }
@@ -220,17 +314,20 @@ export default function App() {
       ...idea,
       title: idea.title.trim() || "未命名科研 idea",
       tags: normalizeTags(idea.tags),
+      todos: idea.todos ?? [],
       repositories: idea.repositories.filter((repo) => repo.name.trim() || repo.urlOrPath.trim()),
       updatedAt: now,
       createdAt: idea.createdAt || now,
-      progress: Math.min(100, Math.max(0, Number(idea.progress ?? 0))),
     };
+    const normalizedWithProgress = withCalculatedIdeaProgress(normalized);
 
     setIdeas((current) => {
-      const exists = current.some((item) => item.id === normalized.id);
-      return exists ? current.map((item) => (item.id === normalized.id ? normalized : item)) : [normalized, ...current];
+      const exists = current.some((item) => item.id === normalizedWithProgress.id);
+      return exists
+        ? current.map((item) => (item.id === normalizedWithProgress.id ? normalizedWithProgress : item))
+        : [normalizedWithProgress, ...current];
     });
-    setSelectedId(normalized.id);
+    setSelectedId(normalizedWithProgress.id);
     setEditingIdea(null);
   }
 
@@ -250,6 +347,172 @@ export default function App() {
     }
   }
 
+  function saveProjectTodo(ideaId: string, todo: TodoItem) {
+    setIdeas((current) =>
+      current.map((idea) => {
+        if (idea.id !== ideaId) return idea;
+        const now = new Date().toISOString();
+        const todos = idea.todos ?? [];
+        const status = normalizeTodoStatus(todo.status);
+        const normalizedTodo: TodoItem = {
+          ...todo,
+          title: todo.title.trim() || "未命名任务",
+          description: todo.description?.trim() || undefined,
+          status,
+          priority: normalizePriority(todo.priority),
+          dueDate: todo.dueDate || undefined,
+          completedAt: status === "done" ? todo.completedAt || now : undefined,
+          updatedAt: now,
+          order: Number.isFinite(todo.order) ? todo.order : todos.length,
+        };
+        const exists = todos.some((item) => item.id === normalizedTodo.id);
+        const nextTodos = exists
+          ? todos.map((item) => (item.id === normalizedTodo.id ? normalizedTodo : item))
+          : [...todos, normalizedTodo];
+        return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+      }),
+    );
+  }
+
+  function changeProjectTodoStatus(ideaId: string, todoId: string, status: TodoStatus) {
+    setIdeas((current) =>
+      current.map((idea) => {
+        if (idea.id !== ideaId) return idea;
+        const now = new Date().toISOString();
+        const nextTodos = (idea.todos ?? []).map((todo) =>
+          todo.id === todoId
+            ? {
+                ...todo,
+                status,
+                completedAt: status === "done" ? todo.completedAt || now : undefined,
+                updatedAt: now,
+              }
+            : todo,
+        );
+        return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+      }),
+    );
+  }
+
+  function deleteProjectTodo(ideaId: string, todoId: string) {
+    if (!window.confirm(t("error.deleteProjectTodo"))) return;
+    setIdeas((current) =>
+      current.map((idea) => {
+        if (idea.id !== ideaId) return idea;
+        const now = new Date().toISOString();
+        const nextTodos = (idea.todos ?? [])
+          .filter((todo) => todo.id !== todoId)
+          .map((todo, index) => ({ ...todo, order: index }));
+        return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+      }),
+    );
+  }
+
+  function moveProjectTodo(ideaId: string, todoId: string, direction: -1 | 1) {
+    setIdeas((current) =>
+      current.map((idea) => {
+        if (idea.id !== ideaId) return idea;
+        const todos = [...(idea.todos ?? [])].sort((a, b) => a.order - b.order);
+        const index = todos.findIndex((todo) => todo.id === todoId);
+        const nextIndex = index + direction;
+        if (index < 0 || nextIndex < 0 || nextIndex >= todos.length) return idea;
+        [todos[index], todos[nextIndex]] = [todos[nextIndex], todos[index]];
+        const now = new Date().toISOString();
+        return withCalculatedIdeaProgress({
+          ...idea,
+          todos: todos.map((todo, order) => ({ ...todo, order, updatedAt: todo.id === todoId ? now : todo.updatedAt })),
+          updatedAt: now,
+        });
+      }),
+    );
+  }
+
+  function saveDailyTodo(todo: DailyTodo) {
+    const now = new Date().toISOString();
+    const status = normalizeTodoStatus(todo.status);
+    const normalizedTodo: DailyTodo = {
+      ...todo,
+      title: todo.title.trim() || "未命名任务",
+      description: todo.description?.trim() || undefined,
+      status,
+      priority: normalizePriority(todo.priority),
+      date: todo.date || selectedDailyDate,
+      tags: normalizeTags(todo.tags),
+      completedAt: status === "done" ? todo.completedAt || now : undefined,
+      createdAt: todo.createdAt || now,
+      updatedAt: now,
+      order: Number.isFinite(todo.order) ? todo.order : dailyTodos.filter((item) => item.date === (todo.date || selectedDailyDate)).length,
+    };
+    setDailyTodos((current) => {
+      const exists = current.some((item) => item.id === normalizedTodo.id);
+      return sortDailyTodos(exists ? current.map((item) => (item.id === normalizedTodo.id ? normalizedTodo : item)) : [...current, normalizedTodo]);
+    });
+    setEditingDailyTodo(null);
+  }
+
+  function changeDailyTodoStatus(id: string, status: DailyTodoStatus) {
+    setDailyTodos((current) =>
+      sortDailyTodos(
+        current.map((todo) => {
+          if (todo.id !== id) return todo;
+          const now = new Date().toISOString();
+          return {
+            ...todo,
+            status,
+            completedAt: status === "done" ? todo.completedAt || now : undefined,
+            updatedAt: now,
+          };
+        }),
+      ),
+    );
+  }
+
+  function deleteDailyTodo(id: string) {
+    if (!window.confirm(t("error.deleteDailyTodo"))) return;
+    setDailyTodos((current) => current.filter((todo) => todo.id !== id));
+  }
+
+  function moveDailyTodo(id: string, direction: -1 | 1) {
+    setDailyTodos((current) => {
+      const target = current.find((todo) => todo.id === id);
+      if (!target) return current;
+      const sameDate = current.filter((todo) => todo.date === target.date).sort((a, b) => a.order - b.order);
+      const index = sameDate.findIndex((todo) => todo.id === id);
+      const nextIndex = index + direction;
+      if (index < 0 || nextIndex < 0 || nextIndex >= sameDate.length) return current;
+      [sameDate[index], sameDate[nextIndex]] = [sameDate[nextIndex], sameDate[index]];
+      const orderMap = new Map(sameDate.map((todo, order) => [todo.id, order]));
+      const now = new Date().toISOString();
+      return sortDailyTodos(
+        current.map((todo) =>
+          orderMap.has(todo.id) ? { ...todo, order: orderMap.get(todo.id) ?? todo.order, updatedAt: todo.id === id ? now : todo.updatedAt } : todo,
+        ),
+      );
+    });
+  }
+
+  function clearDoneDailyTodos(date: string) {
+    if (!window.confirm(t("error.clearDone"))) return;
+    setDailyTodos((current) => current.filter((todo) => todo.date !== date || todo.status !== "done"));
+  }
+
+  function importDailyTodosToIdea(ideaId: string, selectedTodos: DailyTodo[]) {
+    if (selectedTodos.length === 0) return;
+    setIdeas((current) =>
+      current.map((idea) => {
+        if (idea.id !== ideaId) return idea;
+        const now = new Date().toISOString();
+        const startOrder = (idea.todos ?? []).length;
+        const importedTodos = selectedTodos.map((todo, index) => projectTodoFromDailyTodo(todo, startOrder + index));
+        return withCalculatedIdeaProgress({
+          ...idea,
+          todos: [...(idea.todos ?? []), ...importedTodos],
+          updatedAt: now,
+        });
+      }),
+    );
+  }
+
   async function handleImport(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -264,28 +527,48 @@ export default function App() {
     }
   }
 
-  function openRepository(repo: RelatedRepository) {
+  async function openRepository(repo: RelatedRepository) {
     if (/^https?:\/\//i.test(repo.urlOrPath)) {
       void openShell(repo.urlOrPath);
       return;
     }
-    if (repo.urlOrPath.trim()) void openShell(repo.urlOrPath);
+    if (!repo.urlOrPath.trim()) return;
+    try {
+      await invoke("open_local_path", { path: repo.urlOrPath });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      window.alert(message.includes("__TAURI__") ? "Opening local files requires the Tauri desktop runtime." : message || "Unable to open this path.");
+    }
   }
 
   function copyRepositoryPath(repo: RelatedRepository) {
     navigator.clipboard?.writeText(repo.urlOrPath);
   }
 
+  async function revealRepository(repo: RelatedRepository) {
+    if (/^https?:\/\//i.test(repo.urlOrPath) || !repo.urlOrPath.trim()) return;
+    try {
+      await invoke("reveal_in_folder", { path: repo.urlOrPath });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      window.alert(message.includes("__TAURI__") ? "Opening local files requires the Tauri desktop runtime." : message || "Unable to reveal this path.");
+    }
+  }
+
   const shellClass = settings.theme === "dark" ? "theme-dark" : "theme-light";
 
   return (
+    <I18nProvider value={t}>
     <main className={`app-shell ${shellClass}`}>
       <Sidebar
+        appMode={appMode}
         ideas={ideas}
         view={view}
         statusFilter={statusFilter}
         tagFilter={tagFilter}
         allTags={allTags}
+        dailyTodos={dailyTodos}
+        onModeChange={changeAppMode}
         onViewChange={setView}
         onStatusFilter={(status) => {
           setStatusFilter(status);
@@ -299,6 +582,7 @@ export default function App() {
 
       <section className="workspace">
         <Header
+          appMode={appMode}
           view={view}
           statusFilter={statusFilter}
           query={query}
@@ -310,7 +594,7 @@ export default function App() {
           onBoard={() => setView("board")}
         />
 
-        {view === "dashboard" && (
+        {appMode === "research" && view === "dashboard" && (
           <Dashboard
             stats={stats}
             recentIdeas={recentIdeas}
@@ -329,7 +613,7 @@ export default function App() {
           />
         )}
 
-        {view === "board" && (
+        {appMode === "research" && view === "board" && (
           <IdeasBoard
             ideas={filteredIdeas}
             onSelect={(idea) => setSelectedId(idea.id)}
@@ -338,7 +622,7 @@ export default function App() {
           />
         )}
 
-        {view === "list" && (
+        {appMode === "research" && view === "list" && (
           <section className="content-grid">
             <IdeaList
               ideas={filteredIdeas}
@@ -353,10 +637,46 @@ export default function App() {
               onDelete={deleteIdea}
               onAbandon={(idea) => changeIdeaStatus(idea.id, "abandoned")}
               onStatusChange={changeIdeaStatus}
+              onSaveTodo={saveProjectTodo}
+              onChangeTodoStatus={changeProjectTodoStatus}
+              onDeleteTodo={deleteProjectTodo}
+              onMoveTodo={moveProjectTodo}
+              dailyTodos={dailyTodos}
+              onImportDailyTodos={importDailyTodosToIdea}
+              llmSettings={settings.llm}
               onOpenRepository={openRepository}
               onCopyRepository={copyRepositoryPath}
+              onRevealRepository={revealRepository}
             />
           </section>
+        )}
+
+        {appMode === "daily" && view === "daily" && (
+          <DailyTodoPage
+            todos={dailyTodos}
+            selectedDate={selectedDailyDate}
+            allTags={dailyTodoTags}
+            onDateChange={setSelectedDailyDate}
+            onNewTodo={() =>
+              setEditingDailyTodo(
+                createBlankDailyTodo(selectedDailyDate, dailyTodos.filter((todo) => todo.date === selectedDailyDate).length),
+              )
+            }
+            onEditTodo={setEditingDailyTodo}
+            onStatusChange={changeDailyTodoStatus}
+            onDeleteTodo={deleteDailyTodo}
+            onMoveTodo={moveDailyTodo}
+            onClearDone={clearDoneDailyTodos}
+            onAddAiTodos={(drafts) => {
+              const generated = draftTodosToDailyTodos(
+                drafts,
+                selectedDailyDate,
+                dailyTodos.filter((todo) => todo.date === selectedDailyDate).length,
+              );
+              setDailyTodos((current) => sortDailyTodos([...current, ...generated]));
+            }}
+            llmSettings={settings.llm}
+          />
         )}
 
         {view === "settings" && (
@@ -391,29 +711,48 @@ export default function App() {
           onSave={saveModalIdea}
         />
       )}
+
+      {editingDailyTodo && (
+        <DailyTodoEditorModal
+          todo={editingDailyTodo}
+          onClose={() => setEditingDailyTodo(null)}
+          onSave={saveDailyTodo}
+        />
+      )}
     </main>
+    </I18nProvider>
   );
 }
 
 function Sidebar({
+  appMode,
   ideas,
   view,
   statusFilter,
   tagFilter,
   allTags,
+  dailyTodos,
+  onModeChange,
   onViewChange,
   onStatusFilter,
   onTagFilter,
 }: {
+  appMode: AppMode;
   ideas: Idea[];
   view: ViewMode;
   statusFilter: StatusFilter;
   tagFilter: string;
   allTags: string[];
+  dailyTodos: DailyTodo[];
+  onModeChange: (mode: AppMode) => void;
   onViewChange: (view: ViewMode) => void;
   onStatusFilter: (status: StatusFilter) => void;
   onTagFilter: (tag: string) => void;
 }) {
+  const t = useI18n();
+  const todayTodos = dailyTodos.filter((todo) => todo.date === todayDateKey());
+  const todayDone = todayTodos.filter((todo) => todo.status === "done").length;
+
   return (
     <aside className="sidebar">
       <div className="brand-block">
@@ -426,62 +765,96 @@ function Sidebar({
         </div>
       </div>
 
-      <nav className="nav-section">
-        <button className={`nav-item ${view === "dashboard" ? "active" : ""}`} onClick={() => onViewChange("dashboard")}>
-          <Home size={18} />
-          <span>Dashboard</span>
+      <div className="workspace-switcher" aria-label="Workspace mode">
+        <button className={appMode === "research" ? "active" : ""} onClick={() => onModeChange("research")}>
+          <Layers3 size={16} />
+          {t("app.research")}
         </button>
-        <button className={`nav-item ${view === "board" ? "active" : ""}`} onClick={() => onViewChange("board")}>
-          <Layers3 size={18} />
-          <span>Ideas Board</span>
+        <button className={appMode === "daily" ? "active" : ""} onClick={() => onModeChange("daily")}>
+          <ListTodo size={16} />
+          {t("app.daily")}
         </button>
-      </nav>
-
-      <div className="sidebar-label">状态分类</div>
-      <nav className="nav-section">
-        <button className={`nav-item ${statusFilter === "all" && view === "list" ? "active" : ""}`} onClick={() => onStatusFilter("all")}>
-          <Archive size={18} />
-          <span>全部 ideas</span>
-          <strong>{ideas.length}</strong>
-        </button>
-        {statusOrder.map((status) => {
-          const Icon = statusMeta[status].icon;
-          const count = ideas.filter((idea) => idea.status === status).length;
-          return (
-            <button
-              key={status}
-              className={`nav-item ${statusFilter === status && view === "list" ? "active" : ""}`}
-              onClick={() => onStatusFilter(status)}
-            >
-              <Icon size={18} />
-              <span>{statusMeta[status].shortLabel}</span>
-              <strong>{count}</strong>
-            </button>
-          );
-        })}
-      </nav>
-
-      <div className="sidebar-label">标签筛选</div>
-      <div className="tag-cloud">
-        <button className={`mini-chip ${tagFilter === "all" ? "selected" : ""}`} onClick={() => onTagFilter("all")}>
-          全部
-        </button>
-        {allTags.slice(0, 14).map((tag) => (
-          <button key={tag} className={`mini-chip ${tagFilter === tag ? "selected" : ""}`} onClick={() => onTagFilter(tag)}>
-            {tag}
-          </button>
-        ))}
       </div>
+
+      {appMode === "research" ? (
+        <>
+          <nav className="nav-section">
+            <button className={`nav-item ${view === "dashboard" ? "active" : ""}`} onClick={() => onViewChange("dashboard")}>
+              <Home size={18} />
+              <span>{t("nav.dashboard")}</span>
+            </button>
+            <button className={`nav-item ${view === "board" ? "active" : ""}`} onClick={() => onViewChange("board")}>
+              <Layers3 size={18} />
+              <span>{t("nav.board")}</span>
+            </button>
+          </nav>
+
+          <div className="sidebar-label">{t("nav.status")}</div>
+          <nav className="nav-section">
+            <button className={`nav-item ${statusFilter === "all" && view === "list" ? "active" : ""}`} onClick={() => onStatusFilter("all")}>
+              <Archive size={18} />
+              <span>{t("header.list.title")}</span>
+              <strong>{ideas.length}</strong>
+            </button>
+            {statusOrder.map((status) => {
+              const Icon = statusMeta[status].icon;
+              const count = ideas.filter((idea) => idea.status === status).length;
+              return (
+                <button
+                  key={status}
+                  className={`nav-item ${statusFilter === status && view === "list" ? "active" : ""}`}
+                  onClick={() => onStatusFilter(status)}
+                >
+                  <Icon size={18} />
+                  <span>{t(`status.${status}` as any)}</span>
+                  <strong>{count}</strong>
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="sidebar-label">{t("nav.tags")}</div>
+          <div className="tag-cloud">
+            <button className={`mini-chip ${tagFilter === "all" ? "selected" : ""}`} onClick={() => onTagFilter("all")}>
+              {t("common.all")}
+            </button>
+            {allTags.slice(0, 14).map((tag) => (
+              <button key={tag} className={`mini-chip ${tagFilter === tag ? "selected" : ""}`} onClick={() => onTagFilter(tag)}>
+                {tag}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <>
+          <nav className="nav-section">
+            <button className={`nav-item ${view === "daily" ? "active" : ""}`} onClick={() => onViewChange("daily")}>
+              <CalendarDays size={18} />
+              <span>{t("common.today")}</span>
+              <strong>
+                {todayDone}/{todayTodos.length}
+              </strong>
+            </button>
+          </nav>
+          <div className="sidebar-label">{t("app.daily")}</div>
+          <div className="daily-sidebar-summary">
+            <strong>{todayTodos.length}</strong>
+            <span>{t("daily.total")}</span>
+            <small>{todayTodos.length ? Math.round((todayDone / todayTodos.length) * 100) : 0}% {t("daily.rate")}</small>
+          </div>
+        </>
+      )}
 
       <button className={`settings-link ${view === "settings" ? "active" : ""}`} onClick={() => onViewChange("settings")}>
         <Settings size={18} />
-        <span>Settings</span>
+        <span>{t("nav.settings")}</span>
       </button>
     </aside>
   );
 }
 
 function Header({
+  appMode,
   view,
   statusFilter,
   query,
@@ -492,6 +865,7 @@ function Header({
   onAiNewIdea,
   onBoard,
 }: {
+  appMode: AppMode;
   view: ViewMode;
   statusFilter: StatusFilter;
   query: string;
@@ -502,65 +876,72 @@ function Header({
   onAiNewIdea: () => void;
   onBoard: () => void;
 }) {
+  const t = useI18n();
   const title =
-    view === "dashboard"
-      ? "科研想法总览"
+    view === "settings"
+      ? t("header.settings.title")
+      : appMode === "daily"
+      ? t("header.daily.title")
+      : view === "dashboard"
+      ? t("header.dashboard.title")
       : view === "board"
-        ? "Ideas 看板"
-        : view === "settings"
-          ? "设置"
-          : statusFilter === "all"
-            ? "全部 ideas"
-            : statusMeta[statusFilter].label;
+        ? t("header.board.title")
+        : statusFilter === "all"
+            ? t("header.list.title")
+            : t(`status.${statusFilter}` as any);
 
   const subtitle =
     view === "settings"
-      ? "本地数据、主题与后续扩展入口"
+      ? t("header.settings.subtitle")
+      : appMode === "daily"
+      ? t("header.daily.subtitle")
       : view === "board"
-        ? "横向追踪每个科研 idea 的推进状态"
+        ? t("header.board.subtitle")
         : view === "dashboard"
-          ? "沉淀灵感、推进研究路线、关联文档仓库"
+          ? t("header.dashboard.subtitle")
           : statusFilter === "all"
-            ? "按标题、内容和标签实时搜索"
+            ? t("header.list.subtitle")
             : statusMeta[statusFilter].description;
 
   return (
     <header className="topbar">
       <div>
-        <p className="eyebrow">Research Workspace</p>
+        <p className="eyebrow">{appMode === "daily" ? t("header.daily") : t("header.research")}</p>
         <h1>{title}</h1>
         <p>{subtitle}</p>
       </div>
 
-      <div className="topbar-actions">
-        <label className="search-box">
-          <Search size={18} />
-          <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder="搜索标题、内容、标签..." />
-        </label>
+      {appMode === "research" && view !== "settings" && (
+        <div className="topbar-actions">
+          <label className="search-box">
+            <Search size={18} />
+            <input value={query} onChange={(event) => onQueryChange(event.target.value)} placeholder={t("common.search")} />
+          </label>
 
-        <label className="select-box">
-          <ArrowDownAZ size={17} />
-          <select value={sortMode} onChange={(event) => onSortChange(event.target.value as SortMode)}>
-            <option value="updated_desc">最近更新</option>
-            <option value="priority_desc">优先级</option>
-            <option value="created_desc">创建时间</option>
-            <option value="title_asc">标题 A-Z</option>
-          </select>
-        </label>
+          <label className="select-box">
+            <ArrowDownAZ size={17} />
+            <select value={sortMode} onChange={(event) => onSortChange(event.target.value as SortMode)}>
+              <option value="updated_desc">最近更新</option>
+              <option value="priority_desc">优先级</option>
+              <option value="created_desc">创建时间</option>
+              <option value="title_asc">标题 A-Z</option>
+            </select>
+          </label>
 
-        <button className="ghost-button" onClick={onBoard}>
-          <Layers3 size={18} />
-          看板
-        </button>
-        <button className="ghost-button ai-button" onClick={onAiNewIdea}>
-          <Sparkles size={18} />
-          AI 新建 Idea
-        </button>
-        <button className="primary-button" onClick={onNewIdea}>
-          <Plus size={18} />
-          新建 Idea
-        </button>
-      </div>
+          <button className="ghost-button" onClick={onBoard}>
+            <Layers3 size={18} />
+            {t("nav.board")}
+          </button>
+          <button className="ghost-button ai-button" onClick={onAiNewIdea}>
+            <Sparkles size={18} />
+            {t("idea.ai_new")}
+          </button>
+          <button className="primary-button" onClick={onNewIdea}>
+            <Plus size={18} />
+            {t("idea.new")}
+          </button>
+        </div>
+      )}
     </header>
   );
 }
@@ -582,6 +963,7 @@ function Dashboard({
   onSelect: (idea: Idea) => void;
   onStatusSelect: (status: IdeaStatus) => void;
 }) {
+  const t = useI18n();
   const highPriority = ideas.filter((idea) => idea.priority === "high").length;
   const averageProgress = ideas.length
     ? Math.round(ideas.reduce((sum, idea) => sum + Number(idea.progress ?? 0), 0) / ideas.length)
@@ -592,17 +974,17 @@ function Dashboard({
       <div className="overview-band">
         <div>
           <p className="eyebrow">Idea pipeline</p>
-          <h2>从灵感池到论文成果，一屏看清研究路线。</h2>
-          <p>把问题背景、技术路线、实验计划和文档仓库放在同一个轻量桌面工作台里。</p>
+          <h2>{t("dashboard.hero.title")}</h2>
+          <p>{t("dashboard.hero.body")}</p>
         </div>
         <div className="hero-actions">
           <button className="ghost-button ai-button" onClick={onAiNewIdea}>
             <Sparkles size={18} />
-            AI 新建 Idea
+            {t("idea.ai_new")}
           </button>
           <button className="primary-button" onClick={onNewIdea}>
             <Plus size={18} />
-            记录新灵感
+            {t("idea.new")}
           </button>
         </div>
       </div>
@@ -696,6 +1078,11 @@ function IdeaList({
     <section className="idea-list">
       {ideas.map((idea) => (
         <button key={idea.id} className={`idea-card ${selectedId === idea.id ? "selected" : ""}`} onClick={() => onSelect(idea)}>
+          {(() => {
+            const todoSummary = todoCompletionSummary(idea.todos);
+            const progress = calculateTodoProgress(idea.todos);
+            return (
+              <>
           <div className="card-topline">
             <StatusChip status={idea.status} onClick={(event) => {
               event.stopPropagation();
@@ -712,11 +1099,16 @@ function IdeaList({
           </div>
           <div className="card-footer">
             <span>{formatDate(idea.updatedAt)}</span>
-            <span>{idea.progress ?? 0}%</span>
+            <span>{todoSummary.total ? `${todoSummary.done}/${todoSummary.total} completed` : "No todos"}</span>
           </div>
-          <div className="progress-track">
-            <span style={{ width: `${idea.progress ?? 0}%` }} />
-          </div>
+          {todoSummary.total > 0 && (
+            <div className="progress-track">
+              <span style={{ width: `${progress}%` }} />
+            </div>
+          )}
+              </>
+            );
+          })()}
         </button>
       ))}
     </section>
@@ -729,17 +1121,34 @@ function IdeaDetail({
   onDelete,
   onAbandon,
   onStatusChange,
+  onSaveTodo,
+  onChangeTodoStatus,
+  onDeleteTodo,
+  onMoveTodo,
+  dailyTodos,
+  onImportDailyTodos,
+  llmSettings,
   onOpenRepository,
   onCopyRepository,
+  onRevealRepository,
 }: {
   idea?: Idea;
   onEdit: (idea: Idea) => void;
   onDelete: (id: string) => void;
   onAbandon: (idea: Idea) => void;
   onStatusChange: (id: string, status: IdeaStatus) => void;
+  onSaveTodo: (ideaId: string, todo: TodoItem) => void;
+  onChangeTodoStatus: (ideaId: string, todoId: string, status: TodoStatus) => void;
+  onDeleteTodo: (ideaId: string, todoId: string) => void;
+  onMoveTodo: (ideaId: string, todoId: string, direction: -1 | 1) => void;
+  dailyTodos: DailyTodo[];
+  onImportDailyTodos: (ideaId: string, todos: DailyTodo[]) => void;
+  llmSettings: LlmSettings;
   onOpenRepository: (repo: RelatedRepository) => void;
   onCopyRepository: (repo: RelatedRepository) => void;
+  onRevealRepository: (repo: RelatedRepository) => void;
 }) {
+  const t = useI18n();
   if (!idea) {
     return (
       <section className="detail-panel empty-detail">
@@ -748,6 +1157,9 @@ function IdeaDetail({
       </section>
     );
   }
+
+  const todoSummary = todoCompletionSummary(idea.todos);
+  const todoProgress = calculateTodoProgress(idea.todos);
 
   return (
     <section className="detail-panel">
@@ -785,32 +1197,43 @@ function IdeaDetail({
 
       <div className="meta-strip">
         <span>
-          <Calendar size={16} />
-          Target {idea.targetDate ? formatDateOnly(idea.targetDate) : "未设置"}
+          <ListTodo size={16} />
+          {todoSummary.total ? `${todoSummary.done}/${todoSummary.total} completed · ${todoProgress}%` : t("idea.no_todos")}
         </span>
         <span>
           <Tag size={16} />
-          {idea.tags.length ? idea.tags.join(" / ") : "暂无标签"}
+          {idea.tags.length ? idea.tags.join(" / ") : t("idea.no_tags")}
         </span>
       </div>
 
       <section className="detail-section">
-        <h3>Content</h3>
+        <h3>{t("idea.content")}</h3>
         <pre>{idea.content}</pre>
       </section>
 
       <section className="detail-section">
-        <h3>Plan</h3>
+        <h3>{t("idea.plan")}</h3>
         <pre>{idea.plan}</pre>
       </section>
 
+      <ProjectTodoSection
+        idea={idea}
+        onSaveTodo={onSaveTodo}
+        onChangeTodoStatus={onChangeTodoStatus}
+        onDeleteTodo={onDeleteTodo}
+        onMoveTodo={onMoveTodo}
+        dailyTodos={dailyTodos}
+        onImportDailyTodos={onImportDailyTodos}
+        llmSettings={llmSettings}
+      />
+
       <section className="detail-section">
         <div className="section-title compact">
-          <h3>Related Document Repository</h3>
+          <h3>{t("repo.title")}</h3>
           <span>{idea.repositories.length}</span>
         </div>
         {idea.repositories.length === 0 ? (
-          <p className="muted-text">还没有关联仓库、论文、数据集或本地路径。</p>
+          <p className="muted-text">{t("repo.empty")}</p>
         ) : (
           <div className="repo-list">
             {idea.repositories.map((repo) => (
@@ -823,12 +1246,17 @@ function IdeaDetail({
                     {repo.extension ? ` · .${repo.extension}` : ""}
                   </span>
                 </div>
-                <button className="text-icon-button" title="打开" onClick={() => onOpenRepository(repo)}>
+                <button className="text-icon-button" title={t("common.open")} onClick={() => onOpenRepository(repo)}>
                   {/https?:\/\//i.test(repo.urlOrPath) ? <ExternalLink size={17} /> : <FolderOpen size={17} />}
                 </button>
-                <button className="text-icon-button" title="复制路径" onClick={() => onCopyRepository(repo)}>
+                <button className="text-icon-button" title={t("repo.copy")} onClick={() => onCopyRepository(repo)}>
                   <ClipboardCopy size={17} />
                 </button>
+                {!/^https?:\/\//i.test(repo.urlOrPath) && (
+                  <button className="text-icon-button" title={t("repo.reveal")} onClick={() => onRevealRepository(repo)}>
+                    <Eye size={17} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -837,11 +1265,403 @@ function IdeaDetail({
 
       {idea.notes && (
         <section className="detail-section">
-          <h3>Notes</h3>
+          <h3>{t("idea.notes")}</h3>
           <p>{idea.notes}</p>
         </section>
       )}
     </section>
+  );
+}
+
+function ProjectTodoSection({
+  idea,
+  onSaveTodo,
+  onChangeTodoStatus,
+  onDeleteTodo,
+  onMoveTodo,
+  dailyTodos,
+  onImportDailyTodos,
+  llmSettings,
+}: {
+  idea: Idea;
+  onSaveTodo: (ideaId: string, todo: TodoItem) => void;
+  onChangeTodoStatus: (ideaId: string, todoId: string, status: TodoStatus) => void;
+  onDeleteTodo: (ideaId: string, todoId: string) => void;
+  onMoveTodo: (ideaId: string, todoId: string, direction: -1 | 1) => void;
+  dailyTodos: DailyTodo[];
+  onImportDailyTodos: (ideaId: string, todos: DailyTodo[]) => void;
+  llmSettings: LlmSettings;
+}) {
+  const t = useI18n();
+  const [editingTodo, setEditingTodo] = useState<TodoItem | null>(null);
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [dailyImportOpen, setDailyImportOpen] = useState(false);
+  const todos = [...(idea.todos ?? [])].sort((a, b) => a.order - b.order);
+  const summary = todoCompletionSummary(todos);
+
+  return (
+    <section className="detail-section todo-section">
+      <div className="section-title compact">
+        <div>
+          <h3>{t("projectTodo.title")}</h3>
+          <span className="section-caption">{t("projectTodo.caption")}</span>
+        </div>
+        <div className="todo-section-actions">
+          <span className="todo-progress-label">
+            {summary.total ? t("projectTodo.completed", { done: summary.done, total: summary.total }) : t("projectTodo.completed", { done: 0, total: 0 })}
+            {summary.cancelled ? ` · ${summary.cancelled} ${todoStatusMeta.cancelled.label}` : ""}
+          </span>
+          <button type="button" className="ghost-button ai-button" onClick={() => setAiModalOpen(true)}>
+            <Sparkles size={16} />
+            {t("projectTodo.ai")}
+          </button>
+          <button type="button" className="ghost-button" onClick={() => setDailyImportOpen(true)}>
+            <ListTodo size={16} />
+            {t("projectTodo.fromDaily")}
+          </button>
+          <button type="button" className="ghost-button" onClick={() => setEditingTodo(createBlankProjectTodo(todos.length))}>
+            <Plus size={16} />
+            {t("projectTodo.add")}
+          </button>
+        </div>
+      </div>
+
+      {summary.total > 0 && (
+        <div className="progress-track todo-progress">
+          <span style={{ width: `${calculateTodoProgress(todos)}%` }} />
+        </div>
+      )}
+
+      {todos.length === 0 ? (
+        <p className="muted-text">{t("projectTodo.empty")}</p>
+      ) : (
+        <div className="todo-list">
+          {todos.map((todo, index) => (
+            <TodoCard
+              key={todo.id}
+              todo={todo}
+              index={index}
+              total={todos.length}
+              onEdit={() => setEditingTodo(todo)}
+              onStatusChange={(status) => onChangeTodoStatus(idea.id, todo.id, status)}
+              onDelete={() => onDeleteTodo(idea.id, todo.id)}
+              onMove={(direction) => onMoveTodo(idea.id, todo.id, direction)}
+            />
+          ))}
+        </div>
+      )}
+
+      {editingTodo && (
+        <ProjectTodoEditorModal
+          todo={editingTodo}
+          onClose={() => setEditingTodo(null)}
+          onSave={(todo) => {
+            onSaveTodo(idea.id, todo);
+            setEditingTodo(null);
+          }}
+        />
+      )}
+
+      {aiModalOpen && (
+        <ProjectTodoAiModal
+          idea={idea}
+          llmSettings={llmSettings}
+          onClose={() => setAiModalOpen(false)}
+          onApply={(drafts) => {
+            drafts.forEach((draft, index) => {
+              onSaveTodo(idea.id, {
+                ...createBlankProjectTodo(todos.length + index),
+                title: draft.title,
+                description: draft.description,
+                status: draft.status ?? "todo",
+                priority: draft.priority ?? "medium",
+                dueDate: draft.dueDate || undefined,
+                tags: draft.tags ?? [],
+              });
+            });
+            setAiModalOpen(false);
+          }}
+        />
+      )}
+
+      {dailyImportOpen && (
+        <DailyTodoImportModal
+          todos={dailyTodos}
+          onClose={() => setDailyImportOpen(false)}
+          onApply={(selectedTodos) => {
+            onImportDailyTodos(idea.id, selectedTodos);
+            setDailyImportOpen(false);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function TodoCard({
+  todo,
+  index,
+  total,
+  onEdit,
+  onStatusChange,
+  onDelete,
+  onMove,
+}: {
+  todo: TodoItem;
+  index: number;
+  total: number;
+  onEdit: () => void;
+  onStatusChange: (status: TodoStatus) => void;
+  onDelete: () => void;
+  onMove: (direction: -1 | 1) => void;
+}) {
+  return (
+    <article className={`todo-card ${todoStatusMeta[todo.status].className}`}>
+      <div className="todo-card-main">
+        <div className="todo-title-row">
+          <strong>{todo.title}</strong>
+          <PriorityChip priority={todo.priority} />
+        </div>
+        {todo.description && <p>{todo.description}</p>}
+        {todo.tags && todo.tags.length > 0 && (
+          <div className="tag-row">
+            {todo.tags.map((tag) => (
+              <span key={tag}>{tag}</span>
+            ))}
+          </div>
+        )}
+        <div className="todo-meta-row">
+          {todo.dueDate && (
+            <span>
+              <Calendar size={14} />
+              {formatDateOnly(todo.dueDate)}
+            </span>
+          )}
+          {todo.completedAt && (
+            <span>
+              <Check size={14} />
+              {formatDate(todo.completedAt)}
+            </span>
+          )}
+          {todo.source?.type === "daily_todo" && <span>Daily Todo · {formatDateOnly(todo.source.date)}</span>}
+        </div>
+      </div>
+      <div className="todo-card-controls">
+        <select value={todo.status} onChange={(event) => onStatusChange(event.target.value as TodoStatus)}>
+          {todoStatusOrder.map((status) => (
+            <option key={status} value={status}>
+              {todoStatusMeta[status].label}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="text-icon-button" title="上移" disabled={index === 0} onClick={() => onMove(-1)}>
+          <ArrowUp size={16} />
+        </button>
+        <button type="button" className="text-icon-button" title="下移" disabled={index === total - 1} onClick={() => onMove(1)}>
+          <ArrowDown size={16} />
+        </button>
+        <button type="button" className="text-icon-button" title="编辑" onClick={onEdit}>
+          <Pencil size={16} />
+        </button>
+        <button type="button" className="text-icon-button danger-inline" title="删除" onClick={onDelete}>
+          <Trash2 size={16} />
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function ProjectTodoEditorModal({
+  todo,
+  onClose,
+  onSave,
+}: {
+  todo: TodoItem;
+  onClose: () => void;
+  onSave: (todo: TodoItem) => void;
+}) {
+  const [draft, setDraft] = useState<TodoItem>(todo);
+
+  function patch<K extends keyof TodoItem>(key: K, value: TodoItem[K]) {
+    setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    onSave(draft);
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <form className="task-modal" onSubmit={submit}>
+        <div className="modal-heading">
+          <div>
+            <p className="eyebrow">Project Todo</p>
+            <h2>{todo.title ? "编辑 Todo" : "新增 Todo"}</h2>
+          </div>
+          <button type="button" className="ghost-button icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <TodoFormFields draft={draft} onPatch={patch} />
+        <div className="modal-actions">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="primary-button">
+            <Check size={18} />
+            保存 Todo
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ProjectTodoAiModal({
+  idea,
+  llmSettings,
+  onClose,
+  onApply,
+}: {
+  idea: Idea;
+  llmSettings: LlmSettings;
+  onClose: () => void;
+  onApply: (todos: TodoDraft[]) => void;
+}) {
+  const t = useI18n();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [drafts, setDrafts] = useState<TodoDraft[]>([]);
+
+  async function generate() {
+    setLoading(true);
+    setError("");
+    try {
+      setDrafts(await generateProjectTodosWithAI(idea, llmSettings));
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : String(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <section className="task-modal">
+        <div className="modal-heading">
+          <div>
+            <p className="eyebrow">Project Todo AI</p>
+            <h2>{t("projectTodo.aiTitle")}</h2>
+          </div>
+          <button type="button" className="ghost-button icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <p className="muted-text">{t("projectTodo.aiBody")}</p>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="modal-actions split">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            {t("common.cancel")}
+          </button>
+          <button type="button" className="primary-button" onClick={generate} disabled={loading}>
+            <Sparkles size={18} />
+            {loading ? t("common.loading") : t("projectTodo.aiGenerate")}
+          </button>
+        </div>
+        {drafts.length > 0 && (
+          <AiTodoPreview
+            drafts={drafts}
+            onPatch={setDrafts}
+            onApply={() => onApply(drafts)}
+            applyLabel={t("projectTodo.applyPreview")}
+          />
+        )}
+      </section>
+    </div>
+  );
+}
+
+function DailyTodoImportModal({
+  todos,
+  onClose,
+  onApply,
+}: {
+  todos: DailyTodo[];
+  onClose: () => void;
+  onApply: (todos: DailyTodo[]) => void;
+}) {
+  const t = useI18n();
+  const [date, setDate] = useState(todayDateKey());
+  const [query, setQuery] = useState("");
+  const [onlyOpen, setOnlyOpen] = useState(true);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const visibleTodos = todos
+    .filter((todo) => todo.date === date)
+    .filter((todo) => (onlyOpen ? todo.status !== "done" && todo.status !== "cancelled" : true))
+    .filter((todo) => matchesDailyTodo(todo, query, "all"))
+    .sort((a, b) => a.order - b.order);
+
+  function toggle(id: string) {
+    setSelectedIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <section className="task-modal import-modal">
+        <div className="modal-heading">
+          <div>
+            <p className="eyebrow">Daily Todo</p>
+            <h2>{t("daily.fromTitle")}</h2>
+          </div>
+          <button type="button" className="ghost-button icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className="import-toolbar">
+          <label className="field">
+            <span>{t("common.date")}</span>
+            <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+          </label>
+          <label className="search-box">
+            <Search size={18} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
+          </label>
+          <label className="check-row">
+            <input type="checkbox" checked={onlyOpen} onChange={(event) => setOnlyOpen(event.target.checked)} />
+            {t("daily.showOpen")}
+          </label>
+        </div>
+        <div className="import-list">
+          {visibleTodos.map((todo) => (
+            <label key={todo.id} className="import-row">
+              <input type="checkbox" checked={selectedIds.includes(todo.id)} onChange={() => toggle(todo.id)} />
+              <span>
+                <strong>{todo.title}</strong>
+                <small>
+                  {todoStatusMeta[todo.status].label} · {priorityMeta[todo.priority].label}
+                </small>
+              </span>
+            </label>
+          ))}
+          {visibleTodos.length === 0 && <p className="muted-text">{t("daily.emptyGroup")}</p>}
+        </div>
+        <div className="modal-actions">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            {t("common.cancel")}
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => onApply(todos.filter((todo) => selectedIds.includes(todo.id)))}
+            disabled={selectedIds.length === 0}
+          >
+            <Check size={18} />
+            {t("common.confirm")}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -887,6 +1707,10 @@ function IdeasBoard({
                   onDragStart={() => setDraggedId(idea.id)}
                   onClick={() => onSelect(idea)}
                 >
+                  {(() => {
+                    const summary = todoCompletionSummary(idea.todos);
+                    return (
+                      <>
                   <div className="card-topline">
                     <PriorityChip priority={idea.priority} />
                     <button className="text-icon-button" onClick={(event) => {
@@ -903,6 +1727,13 @@ function IdeasBoard({
                       <span key={tag}>{tag}</span>
                     ))}
                   </div>
+                  <div className="board-todo-summary">
+                    <ListTodo size={14} />
+                    <span>{summary.total ? `${summary.done}/${summary.total} completed` : "No todos"}</span>
+                  </div>
+                      </>
+                    );
+                  })()}
                 </article>
               ))}
               {columnIdeas.length === 0 && <div className="board-empty">拖拽 idea 到这里</div>}
@@ -910,6 +1741,356 @@ function IdeasBoard({
           </div>
         );
       })}
+    </section>
+  );
+}
+
+function DailyTodoPage({
+  todos,
+  selectedDate,
+  allTags,
+  onDateChange,
+  onNewTodo,
+  onEditTodo,
+  onStatusChange,
+  onDeleteTodo,
+  onMoveTodo,
+  onClearDone,
+  onAddAiTodos,
+  llmSettings,
+}: {
+  todos: DailyTodo[];
+  selectedDate: string;
+  allTags: string[];
+  onDateChange: (date: string) => void;
+  onNewTodo: () => void;
+  onEditTodo: (todo: DailyTodo) => void;
+  onStatusChange: (id: string, status: DailyTodoStatus) => void;
+  onDeleteTodo: (id: string) => void;
+  onMoveTodo: (id: string, direction: -1 | 1) => void;
+  onClearDone: (date: string) => void;
+  onAddAiTodos: (drafts: TodoDraft[]) => void;
+  llmSettings: LlmSettings;
+}) {
+  const t = useI18n();
+  const [query, setQuery] = useState("");
+  const [tagFilter, setTagFilter] = useState("all");
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+  const dateTodos = todos.filter((todo) => todo.date === selectedDate);
+  const visibleTodos = dateTodos.filter((todo) => matchesDailyTodo(todo, query, tagFilter)).sort((a, b) => a.order - b.order);
+  const activeTodos = dateTodos.filter((todo) => todo.status !== "cancelled");
+  const doneCount = activeTodos.filter((todo) => todo.status === "done").length;
+  const inProgressCount = dateTodos.filter((todo) => todo.status === "in_progress").length;
+  const todoCount = dateTodos.filter((todo) => todo.status === "todo").length;
+  const completionRate = activeTodos.length ? Math.round((doneCount / activeTodos.length) * 100) : 0;
+
+  return (
+    <section className="daily-page">
+      <div className="daily-toolbar">
+        <label className="field daily-date-field">
+          <span>{t("common.date")}</span>
+          <input type="date" value={selectedDate} onChange={(event) => onDateChange(event.target.value)} />
+        </label>
+        <button type="button" className="ghost-button" onClick={() => onDateChange(todayDateKey())}>
+          <CalendarDays size={18} />
+          {t("common.today")}
+        </button>
+        <label className="search-box daily-search">
+          <Search size={18} />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("common.search")} />
+        </label>
+        <select className="tag-select" value={tagFilter} onChange={(event) => setTagFilter(event.target.value)}>
+          <option value="all">{t("common.all")}</option>
+          {allTags.map((tag) => (
+            <option key={tag} value={tag}>
+              {tag}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="ghost-button" onClick={() => onClearDone(selectedDate)} disabled={!dateTodos.some((todo) => todo.status === "done")}>
+          <Trash2 size={18} />
+          {t("daily.clearDone")}
+        </button>
+        <button type="button" className="ghost-button ai-button" onClick={() => setAiModalOpen(true)}>
+          <Sparkles size={18} />
+          {t("daily.ai")}
+        </button>
+        <button type="button" className="primary-button" onClick={onNewTodo}>
+          <Plus size={18} />
+          {t("daily.new")}
+        </button>
+      </div>
+
+      <div className="daily-layout">
+        <aside className="daily-stats-panel">
+          <div>
+            <span>{t("daily.total")}</span>
+            <strong>{dateTodos.length}</strong>
+          </div>
+          <div>
+            <span>{t("daily.done")}</span>
+            <strong>{doneCount}</strong>
+          </div>
+          <div>
+            <span>{t("daily.inProgress")}</span>
+            <strong>{inProgressCount}</strong>
+          </div>
+          <div>
+            <span>{t("daily.notStarted")}</span>
+            <strong>{todoCount}</strong>
+          </div>
+          <div className="daily-rate">
+            <span>{t("daily.rate")}</span>
+            <strong>{completionRate}%</strong>
+            <div className="progress-track">
+              <span style={{ width: `${completionRate}%` }} />
+            </div>
+          </div>
+        </aside>
+
+        <div className="daily-groups">
+          {todoStatusOrder.map((status) => {
+            const groupTodos = visibleTodos.filter((todo) => todo.status === status);
+            return (
+              <section key={status} className="daily-group">
+                <div className="daily-group-heading">
+                  <strong>{todoStatusMeta[status].label}</strong>
+                  <span>{groupTodos.length}</span>
+                </div>
+                <div className="todo-list">
+                  {groupTodos.map((todo) => {
+                    const sameDateTodos = visibleTodos.filter((item) => item.date === todo.date).sort((a, b) => a.order - b.order);
+                    const index = sameDateTodos.findIndex((item) => item.id === todo.id);
+                    return (
+                      <DailyTodoCard
+                        key={todo.id}
+                        todo={todo}
+                        index={index}
+                        total={sameDateTodos.length}
+                        onEdit={() => onEditTodo(todo)}
+                        onStatusChange={(nextStatus) => onStatusChange(todo.id, nextStatus)}
+                        onDelete={() => onDeleteTodo(todo.id)}
+                        onMove={(direction) => onMoveTodo(todo.id, direction)}
+                      />
+                    );
+                  })}
+                  {groupTodos.length === 0 && <p className="muted-text daily-empty-group">{t("daily.emptyGroup")}</p>}
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      </div>
+      {aiModalOpen && (
+        <DailyTodoAiModal
+          selectedDate={selectedDate}
+          llmSettings={llmSettings}
+          onClose={() => setAiModalOpen(false)}
+          onApply={(drafts) => {
+            onAddAiTodos(drafts);
+            setAiModalOpen(false);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function DailyTodoCard({
+  todo,
+  index,
+  total,
+  onEdit,
+  onStatusChange,
+  onDelete,
+  onMove,
+}: {
+  todo: DailyTodo;
+  index: number;
+  total: number;
+  onEdit: () => void;
+  onStatusChange: (status: DailyTodoStatus) => void;
+  onDelete: () => void;
+  onMove: (direction: -1 | 1) => void;
+}) {
+  return (
+    <article className={`todo-card daily-todo-card ${todoStatusMeta[todo.status].className}`}>
+      <div className="todo-card-main">
+        <div className="todo-title-row">
+          <strong>{todo.title}</strong>
+          <PriorityChip priority={todo.priority} />
+        </div>
+        {todo.description && <p>{todo.description}</p>}
+        <div className="tag-row">
+          {todo.tags.map((tag) => (
+            <span key={tag}>{tag}</span>
+          ))}
+        </div>
+        <div className="todo-meta-row">
+          <span>
+            <Calendar size={14} />
+            {formatDateOnly(todo.date)}
+          </span>
+          {todo.completedAt && (
+            <span>
+              <Check size={14} />
+              {formatDate(todo.completedAt)}
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="todo-card-controls">
+        <select value={todo.status} onChange={(event) => onStatusChange(event.target.value as DailyTodoStatus)}>
+          {todoStatusOrder.map((status) => (
+            <option key={status} value={status}>
+              {todoStatusMeta[status].label}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="text-icon-button" title="恢复为待办" onClick={() => onStatusChange("todo")}>
+          <RotateCcw size={16} />
+        </button>
+        <button type="button" className="text-icon-button" title="完成" onClick={() => onStatusChange("done")}>
+          <Check size={16} />
+        </button>
+        <button type="button" className="text-icon-button" title="上移" disabled={index === 0} onClick={() => onMove(-1)}>
+          <ArrowUp size={16} />
+        </button>
+        <button type="button" className="text-icon-button" title="下移" disabled={index === total - 1} onClick={() => onMove(1)}>
+          <ArrowDown size={16} />
+        </button>
+        <button type="button" className="text-icon-button" title="编辑" onClick={onEdit}>
+          <Pencil size={16} />
+        </button>
+        <button type="button" className="text-icon-button danger-inline" title="删除" onClick={onDelete}>
+          <Trash2 size={16} />
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function DailyTodoAiModal({
+  selectedDate,
+  llmSettings,
+  onClose,
+  onApply,
+}: {
+  selectedDate: string;
+  llmSettings: LlmSettings;
+  onClose: () => void;
+  onApply: (todos: TodoDraft[]) => void;
+}) {
+  const t = useI18n();
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [drafts, setDrafts] = useState<TodoDraft[]>([]);
+
+  async function generate() {
+    if (!input.trim()) {
+      setError(t("error.aiInput"));
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      setDrafts(await generateDailyTodosWithAI(input, selectedDate, llmSettings));
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : String(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <section className="task-modal">
+        <div className="modal-heading">
+          <div>
+            <p className="eyebrow">Daily Todo AI</p>
+            <h2>{t("daily.aiTitle")}</h2>
+          </div>
+          <button type="button" className="ghost-button icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+        <label className="field wide ai-input">
+          <span>{t("common.description")}</span>
+          <textarea value={input} onChange={(event) => setInput(event.target.value)} rows={5} placeholder={t("daily.aiPlaceholder")} autoFocus />
+        </label>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="modal-actions split">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            {t("common.cancel")}
+          </button>
+          <button type="button" className="primary-button" onClick={generate} disabled={loading}>
+            <Sparkles size={18} />
+            {loading ? t("common.loading") : t("daily.aiGenerate")}
+          </button>
+        </div>
+        {drafts.length > 0 && (
+          <AiTodoPreview drafts={drafts} onPatch={setDrafts} onApply={() => onApply(drafts)} applyLabel={t("daily.applyPreview")} />
+        )}
+      </section>
+    </div>
+  );
+}
+
+function AiTodoPreview({
+  drafts,
+  onPatch,
+  onApply,
+  applyLabel,
+}: {
+  drafts: TodoDraft[];
+  onPatch: (todos: TodoDraft[]) => void;
+  onApply: () => void;
+  applyLabel: string;
+}) {
+  const t = useI18n();
+
+  function patchTodo(index: number, patch: Partial<TodoDraft>) {
+    onPatch(drafts.map((todo, todoIndex) => (todoIndex === index ? { ...todo, ...patch } : todo)));
+  }
+
+  function removeTodo(index: number) {
+    onPatch(drafts.filter((_todo, todoIndex) => todoIndex !== index));
+  }
+
+  return (
+    <section className="ai-preview todo-ai-preview">
+      <div className="section-title compact">
+        <h3>{t("common.preview")}</h3>
+        <button type="button" className="primary-button" onClick={onApply} disabled={drafts.length === 0}>
+          <Plus size={16} />
+          {applyLabel}
+        </button>
+      </div>
+      <div className="todo-preview-list">
+        {drafts.map((todo, index) => (
+          <div key={`${todo.title}-${index}`} className="todo-preview-row">
+            <input value={todo.title} onChange={(event) => patchTodo(index, { title: event.target.value })} placeholder={t("common.title")} />
+            <select value={todo.priority ?? "medium"} onChange={(event) => patchTodo(index, { priority: event.target.value as Priority })}>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+            <select value={todo.status ?? "todo"} onChange={(event) => patchTodo(index, { status: event.target.value as TodoStatus })}>
+              {todoStatusOrder.map((status) => (
+                <option key={status} value={status}>
+                  {todoStatusMeta[status].label}
+                </option>
+              ))}
+            </select>
+            <input value={todo.tags?.join(", ") ?? ""} onChange={(event) => patchTodo(index, { tags: normalizeTags(event.target.value) })} placeholder="tags" />
+            <textarea value={todo.description ?? ""} onChange={(event) => patchTodo(index, { description: event.target.value })} placeholder={t("common.description")} rows={2} />
+            <button type="button" className="danger-button icon-button" onClick={() => removeTodo(index)}>
+              <Trash2 size={16} />
+            </button>
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
@@ -927,6 +2108,7 @@ function SettingsPage({
   onExport: () => void;
   onImport: () => void;
 }) {
+  const t = useI18n();
   const { theme, llm } = settings;
   const [showApiKey, setShowApiKey] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[]>(() => defaultModelOptions(llm.provider));
@@ -935,6 +2117,7 @@ function SettingsPage({
   const [testLoading, setTestLoading] = useState(false);
   const [testResult, setTestResult] = useState<TestConnectionResult | null>(null);
   const updateTheme = (nextTheme: ThemeMode) => onSettingsChange({ ...settings, theme: nextTheme });
+  const updateLanguage = (language: AppSettings["language"]) => onSettingsChange({ ...settings, language });
   const updateLlm = (patch: Partial<LlmSettings>) => onSettingsChange({ ...settings, llm: { ...llm, ...patch } });
 
   useEffect(() => {
@@ -1020,17 +2203,17 @@ function SettingsPage({
       <div className="settings-card">
         <Database size={22} />
         <div>
-          <h2>本地数据</h2>
-          <p>当前通过 IndexedDB 持久化，Tauri 桌面端离线可用。已保存 {ideaCount} 条 ideas。</p>
+          <h2>{t("settings.localData")}</h2>
+          <p>{t("settings.localDataBody", { count: ideaCount })}</p>
         </div>
         <div className="settings-actions">
           <button className="ghost-button" onClick={onImport}>
             <Upload size={18} />
-            导入
+            {t("settings.import")}
           </button>
           <button className="primary-button" onClick={onExport}>
             <Download size={18} />
-            导出
+            {t("settings.export")}
           </button>
         </div>
       </div>
@@ -1038,15 +2221,31 @@ function SettingsPage({
       <div className="settings-card">
         {theme === "dark" ? <Moon size={22} /> : <Sun size={22} />}
         <div>
-          <h2>主题</h2>
-          <p>浅色适合白天阅读，深色适合长时间写作和夜间整理。</p>
+          <h2>{t("settings.theme")}</h2>
+          <p>{t("settings.themeBody")}</p>
         </div>
         <div className="segmented">
           <button className={theme === "light" ? "active" : ""} onClick={() => updateTheme("light")}>
-            浅色
+            {t("settings.light")}
           </button>
           <button className={theme === "dark" ? "active" : ""} onClick={() => updateTheme("dark")}>
-            深色
+            {t("settings.dark")}
+          </button>
+        </div>
+      </div>
+
+      <div className="settings-card">
+        <Languages size={22} />
+        <div>
+          <h2>{t("settings.language")}</h2>
+          <p>{t("settings.languageBody")}</p>
+        </div>
+        <div className="segmented">
+          <button className={settings.language === "en" ? "active" : ""} onClick={() => updateLanguage("en")}>
+            {t("settings.english")}
+          </button>
+          <button className={settings.language === "zh" ? "active" : ""} onClick={() => updateLanguage("zh")}>
+            {t("settings.chinese")}
           </button>
         </div>
       </div>
@@ -1054,8 +2253,8 @@ function SettingsPage({
       <div className="settings-card settings-form-card">
         <Sparkles size={22} />
         <div>
-          <h2>LLM 配置</h2>
-          <p>AI 新建和 AI 整理通过 Tauri command 调用 LLM Provider。配置保存在本地工作区。</p>
+          <h2>{t("settings.llm")}</h2>
+          <p>{t("settings.llmBody")}</p>
           <div className="settings-form-grid">
             <label className="field">
               <span>Provider</span>
@@ -1110,11 +2309,11 @@ function SettingsPage({
           <div className="settings-actions llm-actions">
             <button className="ghost-button" onClick={refreshModels} disabled={modelsLoading}>
               <RefreshCw size={18} />
-              {modelsLoading ? "刷新中..." : "刷新模型列表"}
+              {modelsLoading ? t("common.loading") : t("settings.refreshModels")}
             </button>
             <button className="primary-button" onClick={testConnection} disabled={testLoading}>
               <Sparkles size={18} />
-              {testLoading ? "测试中..." : "测试连接"}
+              {testLoading ? t("common.loading") : t("settings.testConnection")}
             </button>
           </div>
           {modelListMessage && <p className="settings-note">{modelListMessage}</p>}
@@ -1134,8 +2333,8 @@ function SettingsPage({
       <div className="settings-card">
         <Sparkles size={22} />
         <div>
-          <h2>关于 NEW IDEAS</h2>
-          <p>MVP 已预留 SQLite、Markdown 编辑器、附件管理、云同步和 Tauri 文件打开能力的接入位置。</p>
+          <h2>{t("settings.about")}</h2>
+          <p>{t("settings.aboutBody")}</p>
         </div>
       </div>
     </section>
@@ -1352,22 +2551,6 @@ function IdeaEditorModal({
             </select>
           </label>
 
-          <label className="field">
-            <span>Target Date</span>
-            <input type="date" value={draft.targetDate ?? ""} onChange={(event) => patch("targetDate", event.target.value)} />
-          </label>
-
-          <label className="field">
-            <span>Progress</span>
-            <input
-              type="number"
-              min={0}
-              max={100}
-              value={draft.progress ?? 0}
-              onChange={(event) => patch("progress", Number(event.target.value))}
-            />
-          </label>
-
           <label className="field wide">
             <span>Tags</span>
             <input value={tagsInput} onChange={(event) => setTagsInput(event.target.value)} placeholder="MLP, CFD, 论文想法" />
@@ -1379,7 +2562,7 @@ function IdeaEditorModal({
           </label>
 
           <label className="field wide">
-            <span>Plan</span>
+            <span>Plan / Research Route</span>
             <textarea value={draft.plan} onChange={(event) => patch("plan", event.target.value)} rows={7} />
           </label>
 
@@ -1450,6 +2633,138 @@ function IdeaEditorModal({
   );
 }
 
+function TodoFormFields({
+  draft,
+  onPatch,
+}: {
+  draft: TodoItem;
+  onPatch: <K extends keyof TodoItem>(key: K, value: TodoItem[K]) => void;
+}) {
+  return (
+    <div className="form-grid task-form-grid">
+      <label className="field wide">
+        <span>Title</span>
+        <input value={draft.title} onChange={(event) => onPatch("title", event.target.value)} placeholder="可执行任务标题" autoFocus />
+      </label>
+      <label className="field">
+        <span>Status</span>
+        <select value={draft.status} onChange={(event) => onPatch("status", event.target.value as TodoStatus)}>
+          {todoStatusOrder.map((status) => (
+            <option key={status} value={status}>
+              {todoStatusMeta[status].label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="field">
+        <span>Priority</span>
+        <select value={draft.priority} onChange={(event) => onPatch("priority", event.target.value as Priority)}>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </label>
+      <label className="field">
+        <span>Due Date</span>
+        <input type="date" value={draft.dueDate ?? ""} onChange={(event) => onPatch("dueDate", event.target.value)} />
+      </label>
+      <label className="field wide">
+        <span>Tags</span>
+        <input value={draft.tags?.join(", ") ?? ""} onChange={(event) => onPatch("tags", normalizeTags(event.target.value))} placeholder="reading, experiment" />
+      </label>
+      <label className="field wide">
+        <span>Description</span>
+        <textarea value={draft.description ?? ""} onChange={(event) => onPatch("description", event.target.value)} rows={4} />
+      </label>
+    </div>
+  );
+}
+
+function DailyTodoEditorModal({
+  todo,
+  onClose,
+  onSave,
+}: {
+  todo: DailyTodo;
+  onClose: () => void;
+  onSave: (todo: DailyTodo) => void;
+}) {
+  const [draft, setDraft] = useState<DailyTodo>(todo);
+  const [tagsInput, setTagsInput] = useState(todo.tags.join(", "));
+
+  function patch<K extends keyof DailyTodo>(key: K, value: DailyTodo[K]) {
+    setDraft((current) => ({ ...current, [key]: value }));
+  }
+
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    onSave({ ...draft, tags: normalizeTags(tagsInput) });
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <form className="task-modal" onSubmit={submit}>
+        <div className="modal-heading">
+          <div>
+            <p className="eyebrow">Daily Todo</p>
+            <h2>{todo.title ? "编辑 Daily Todo" : "新增 Daily Todo"}</h2>
+          </div>
+          <button type="button" className="ghost-button icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="form-grid task-form-grid">
+          <label className="field wide">
+            <span>Title</span>
+            <input value={draft.title} onChange={(event) => patch("title", event.target.value)} placeholder="任务标题" autoFocus />
+          </label>
+          <label className="field">
+            <span>Date</span>
+            <input type="date" value={draft.date} onChange={(event) => patch("date", event.target.value)} />
+          </label>
+          <label className="field">
+            <span>Status</span>
+            <select value={draft.status} onChange={(event) => patch("status", event.target.value as DailyTodoStatus)}>
+              {todoStatusOrder.map((status) => (
+                <option key={status} value={status}>
+                  {todoStatusMeta[status].label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Priority</span>
+            <select value={draft.priority} onChange={(event) => patch("priority", event.target.value as Priority)}>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Tags</span>
+            <input value={tagsInput} onChange={(event) => setTagsInput(event.target.value)} placeholder="work, life" />
+          </label>
+          <label className="field wide">
+            <span>Description</span>
+            <textarea value={draft.description ?? ""} onChange={(event) => patch("description", event.target.value)} rows={4} />
+          </label>
+        </div>
+
+        <div className="modal-actions">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="primary-button">
+            <Check size={18} />
+            保存 Todo
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function IdeaDraftPreview({ draft }: { draft: IdeaDraft }) {
   return (
     <div className="draft-preview-grid">
@@ -1460,7 +2775,7 @@ function IdeaDraftPreview({ draft }: { draft: IdeaDraft }) {
       <div>
         <span>Status / Priority / Progress</span>
         <strong>
-          {statusMeta[draft.status].shortLabel} · {priorityMeta[draft.priority].label} · {draft.progress ?? 0}%
+          {statusMeta[draft.status].shortLabel} · {priorityMeta[draft.priority].label} · {draft.todos.length} todos
         </strong>
       </div>
       <div>
@@ -1479,6 +2794,12 @@ function IdeaDraftPreview({ draft }: { draft: IdeaDraft }) {
         <span>Plan</span>
         <pre>{draft.plan}</pre>
       </div>
+      {draft.todos.length > 0 && (
+        <div className="wide">
+          <span>Initial Todos</span>
+          <pre>{draft.todos.map((todo, index) => `${index + 1}. [${todo.priority ?? "medium"}] ${todo.title}${todo.description ? ` - ${todo.description}` : ""}`).join("\n")}</pre>
+        </div>
+      )}
       {draft.notes && (
         <div className="wide">
           <span>Notes</span>

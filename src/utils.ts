@@ -1,5 +1,5 @@
 import { priorityMeta, statusOrder } from "./constants";
-import type { Idea, IdeaStatus, Priority, SortMode } from "./types";
+import type { DailyTodo, Idea, IdeaStatus, Priority, SortMode, TodoDraft, TodoItem, TodoStatus } from "./types";
 
 export function createId(prefix = "id") {
   const random = Math.random().toString(36).slice(2, 9);
@@ -79,4 +79,131 @@ export function matchesIdea(idea: Idea, query: string, tag: string, status: Idea
 
 export function priorityToProgress(priority: Priority) {
   return priority === "high" ? 72 : priority === "medium" ? 44 : 18;
+}
+
+export function todayDateKey() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset();
+  return new Date(now.getTime() - offset * 60_000).toISOString().slice(0, 10);
+}
+
+export function normalizeTodoStatus(status?: string): TodoStatus {
+  if (status === "in_progress" || status === "done" || status === "cancelled") return status;
+  return "todo";
+}
+
+export function normalizePriority(priority?: string): Priority {
+  if (priority === "low" || priority === "high") return priority;
+  return "medium";
+}
+
+export function normalizeTodoDrafts(todos: TodoDraft[] | undefined, existingTodos: TodoItem[] = []): TodoItem[] {
+  const now = new Date().toISOString();
+  return (Array.isArray(todos) ? todos : [])
+    .filter((todo) => todo?.title?.trim())
+    .map((todo, index) => {
+      const existing = existingTodos[index];
+      const status = normalizeTodoStatus(todo.status);
+      const completedAt = status === "done" ? existing?.completedAt ?? now : undefined;
+      return {
+        id: existing?.id ?? createId("todo"),
+        title: todo.title.trim(),
+        description: todo.description?.trim() || undefined,
+        status,
+        priority: normalizePriority(todo.priority),
+        tags: normalizeTags(Array.isArray(todo.tags) ? todo.tags : []),
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        dueDate: todo.dueDate || undefined,
+        completedAt,
+        order: existing?.order ?? index,
+      };
+    });
+}
+
+export function normalizeIdeaTodos(todos: TodoItem[] | undefined): TodoItem[] {
+  const now = new Date().toISOString();
+  return (Array.isArray(todos) ? todos : [])
+    .filter((todo) => todo?.title?.trim())
+    .map((todo, index) => {
+      const status = normalizeTodoStatus(todo.status);
+      return {
+        ...todo,
+        id: todo.id || createId("todo"),
+        title: todo.title.trim(),
+        description: todo.description?.trim() || undefined,
+        status,
+        priority: normalizePriority(todo.priority),
+        tags: normalizeTags(Array.isArray(todo.tags) ? todo.tags : []),
+        createdAt: todo.createdAt || now,
+        updatedAt: todo.updatedAt || now,
+        dueDate: todo.dueDate || undefined,
+        completedAt: status === "done" ? todo.completedAt || now : undefined,
+        order: Number.isFinite(todo.order) ? todo.order : index,
+      };
+    })
+    .sort((a, b) => a.order - b.order)
+    .map((todo, index) => ({ ...todo, order: index }));
+}
+
+export function calculateTodoProgress(todos: TodoItem[] | undefined) {
+  const activeTodos = (todos ?? []).filter((todo) => todo.status !== "cancelled");
+  if (activeTodos.length === 0) return 0;
+  const done = activeTodos.filter((todo) => todo.status === "done").length;
+  return Math.round((done / activeTodos.length) * 100);
+}
+
+export function todoCompletionSummary(todos: TodoItem[] | undefined) {
+  const activeTodos = (todos ?? []).filter((todo) => todo.status !== "cancelled");
+  const done = activeTodos.filter((todo) => todo.status === "done").length;
+  return { done, total: activeTodos.length, cancelled: (todos ?? []).filter((todo) => todo.status === "cancelled").length };
+}
+
+export function withCalculatedIdeaProgress(idea: Idea): Idea {
+  const todos = normalizeIdeaTodos(idea.todos);
+  return {
+    ...idea,
+    todos,
+    progress: calculateTodoProgress(todos),
+  };
+}
+
+export function sortDailyTodos(todos: DailyTodo[]) {
+  return [...todos].sort((a, b) => {
+    if (a.date !== b.date) return b.date.localeCompare(a.date);
+    return a.order - b.order || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+  });
+}
+
+export function matchesDailyTodo(todo: DailyTodo, query: string, tag: string) {
+  const normalizedQuery = query.trim().toLowerCase();
+  const tagMatch = tag === "all" || todo.tags.includes(tag);
+  const queryMatch =
+    !normalizedQuery ||
+    [todo.title, todo.description ?? "", todo.tags.join(" ")]
+      .join(" ")
+      .toLowerCase()
+      .includes(normalizedQuery);
+  return tagMatch && queryMatch;
+}
+
+export function projectTodoFromDailyTodo(todo: DailyTodo, order: number): TodoItem {
+  const now = new Date().toISOString();
+  return {
+    id: createId("todo"),
+    title: todo.title,
+    description: todo.description,
+    status: normalizeTodoStatus(todo.status),
+    priority: normalizePriority(todo.priority),
+    tags: normalizeTags(todo.tags),
+    createdAt: now,
+    updatedAt: now,
+    completedAt: todo.status === "done" ? todo.completedAt || now : undefined,
+    order,
+    source: {
+      type: "daily_todo",
+      id: todo.id,
+      date: todo.date,
+    },
+  };
 }

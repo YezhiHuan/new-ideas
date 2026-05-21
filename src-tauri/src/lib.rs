@@ -1,6 +1,8 @@
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::path::Path;
+use std::process::Command;
 
 const MISSING_API_KEY_MESSAGE: &str = "未配置 API Key，请先在 Settings Page 配置。";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -20,6 +22,15 @@ enum Priority {
     Low,
     Medium,
     High,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TodoStatus {
+    Todo,
+    InProgress,
+    Done,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,10 +57,28 @@ struct RepositoryDraft {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TodoDraft {
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    status: Option<TodoStatus>,
+    #[serde(default)]
+    priority: Option<Priority>,
+    #[serde(default)]
+    due_date: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct IdeaDraft {
     title: String,
     content: String,
     plan: String,
+    #[serde(default)]
+    todos: Vec<TodoDraft>,
     repositories: Vec<RepositoryDraft>,
     status: IdeaStatus,
     tags: Vec<String>,
@@ -69,6 +98,22 @@ struct LlmConfig {
     base_url: String,
     api_key: String,
     model: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectTodoAiInput {
+    title: String,
+    content: String,
+    plan: String,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TodoAiResponse {
+    todos: Vec<TodoDraft>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +178,56 @@ async fn organize_idea_with_ai(input: IdeaDraft, config: LlmConfig) -> Result<Id
         serde_json::to_string_pretty(&input).map_err(|_| "无法序列化当前 idea。")?
     );
     request_idea_draft(user_prompt, config).await
+}
+
+#[tauri::command]
+async fn generate_project_todos_with_ai(input: ProjectTodoAiInput, config: LlmConfig) -> Result<TodoAiResponse, String> {
+    validate_base_settings(&config, true)?;
+    let user_prompt = format!(
+        "Create executable Project Todo items for this research idea. Use the idea context only; do not invent completed work.\n\nTitle:\n{}\n\nContent:\n{}\n\nPlan:\n{}\n\nNotes:\n{}",
+        input.title.trim(),
+        input.content.trim(),
+        input.plan.trim(),
+        input.notes.unwrap_or_default().trim()
+    );
+    request_todo_draft(user_prompt, project_todo_system_prompt(), config).await
+}
+
+#[tauri::command]
+async fn generate_daily_todos_with_ai(input: String, date: String, config: LlmConfig) -> Result<TodoAiResponse, String> {
+    if input.trim().is_empty() {
+        return Err("Please enter tasks to organize.".to_string());
+    }
+    validate_base_settings(&config, true)?;
+    let user_prompt = format!(
+        "Convert this natural language task note into Daily Todo items for date {}:\n\n{}",
+        date.trim(),
+        input.trim()
+    );
+    request_todo_draft(user_prompt, daily_todo_system_prompt(), config).await
+}
+
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    Path::new(&path).exists()
+}
+
+#[tauri::command]
+fn open_local_path(path: String) -> Result<(), String> {
+    let target = Path::new(&path);
+    if !target.exists() {
+        return Err("Path does not exist.".to_string());
+    }
+    open_path_with_system(target)
+}
+
+#[tauri::command]
+fn reveal_in_folder(path: String) -> Result<(), String> {
+    let target = Path::new(&path);
+    if !target.exists() {
+        return Err("Path does not exist.".to_string());
+    }
+    reveal_path_with_system(target)
 }
 
 async fn fetch_openai_compatible_models(config: LlmConfig) -> Result<Vec<String>, String> {
@@ -253,20 +348,30 @@ async fn response_to_test_result(
 
 async fn request_idea_draft(user_prompt: String, config: LlmConfig) -> Result<IdeaDraft, String> {
     let raw_text = match provider_kind(&config.provider).as_str() {
-        "anthropic" => request_anthropic_idea(user_prompt, config).await?,
-        "openai" | "openai-compatible" => request_openai_compatible_idea(user_prompt, config).await?,
+        "anthropic" => request_anthropic_json(user_prompt, idea_system_prompt(), config, 1800).await?,
+        "openai" | "openai-compatible" => request_openai_compatible_json(user_prompt, idea_system_prompt(), config).await?,
         _ => return Err("不支持的 Provider。".to_string()),
     };
 
     parse_idea_draft(&raw_text)
 }
 
-async fn request_openai_compatible_idea(user_prompt: String, config: LlmConfig) -> Result<String, String> {
+async fn request_todo_draft(user_prompt: String, system_prompt: &'static str, config: LlmConfig) -> Result<TodoAiResponse, String> {
+    let raw_text = match provider_kind(&config.provider).as_str() {
+        "anthropic" => request_anthropic_json(user_prompt, system_prompt, config, 1400).await?,
+        "openai" | "openai-compatible" => request_openai_compatible_json(user_prompt, system_prompt, config).await?,
+        _ => return Err("Unsupported provider.".to_string()),
+    };
+
+    parse_todo_response(&raw_text)
+}
+
+async fn request_openai_compatible_json(user_prompt: String, system_prompt: &'static str, config: LlmConfig) -> Result<String, String> {
     let endpoint = join_endpoint(&config.base_url, "chat/completions");
     let payload = json!({
         "model": config.model.trim(),
         "messages": [
-            { "role": "system", "content": idea_system_prompt() },
+            { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt }
         ],
         "temperature": 0.2,
@@ -302,13 +407,18 @@ async fn request_openai_compatible_idea(user_prompt: String, config: LlmConfig) 
         .ok_or_else(|| "AI 响应中没有可用的 message.content。".to_string())
 }
 
-async fn request_anthropic_idea(user_prompt: String, config: LlmConfig) -> Result<String, String> {
+async fn request_anthropic_json(
+    user_prompt: String,
+    system_prompt: &'static str,
+    config: LlmConfig,
+    max_tokens: u16,
+) -> Result<String, String> {
     let endpoint = anthropic_messages_endpoint(&config.base_url);
     let payload = json!({
         "model": config.model.trim(),
-        "max_tokens": 1800,
+        "max_tokens": max_tokens,
         "temperature": 0.2,
-        "system": idea_system_prompt(),
+        "system": system_prompt,
         "messages": [{ "role": "user", "content": user_prompt }]
     });
 
@@ -354,6 +464,19 @@ fn parse_idea_draft(text: &str) -> Result<IdeaDraft, String> {
     })
 }
 
+fn parse_todo_response(text: &str) -> Result<TodoAiResponse, String> {
+    let json_text = extract_json_value(text).ok_or_else(|| "AI response did not contain JSON.".to_string())?;
+    let raw: Value = serde_json::from_str(json_text).map_err(|error| {
+        eprintln!("AI todo raw JSON parse error: {}\nRaw text:\n{}", error, json_text);
+        "AI returned an invalid todo structure. Please try again.".to_string()
+    })?;
+    let todos = normalize_todo_response(raw);
+    if todos.is_empty() {
+        return Err("AI did not return any usable todo items.".to_string());
+    }
+    Ok(TodoAiResponse { todos })
+}
+
 fn normalize_idea_draft(raw: Value) -> Result<IdeaDraft, String> {
     let object = raw
         .as_object()
@@ -363,6 +486,7 @@ fn normalize_idea_draft(raw: Value) -> Result<IdeaDraft, String> {
         title: value_to_string(object.get("title")).trim().to_string(),
         content: value_to_string(object.get("content")).trim().to_string(),
         plan: value_to_string(object.get("plan")).trim().to_string(),
+        todos: normalize_todos(object.get("todos")),
         repositories: normalize_repositories(object.get("repositories")),
         status: normalize_status(object.get("status")),
         tags: normalize_tags(object.get("tags")),
@@ -379,6 +503,12 @@ fn normalize_idea_draft(raw: Value) -> Result<IdeaDraft, String> {
         .repositories
         .into_iter()
         .filter(|repo| !repo.name.trim().is_empty() || !repo.url_or_path.trim().is_empty())
+        .collect();
+    draft.todos = draft
+        .todos
+        .into_iter()
+        .filter(|todo| !todo.title.trim().is_empty())
+        .take(12)
         .collect();
     draft.progress = Some(draft.progress.unwrap_or(0).min(100));
 
@@ -444,6 +574,82 @@ fn normalize_repositories(value: Option<&Value>) -> Vec<RepositoryDraft> {
         .collect()
 }
 
+fn normalize_todos(value: Option<&Value>) -> Vec<TodoDraft> {
+    match value {
+        Some(Value::Array(items)) => items.iter().filter_map(normalize_todo_item).collect(),
+        Some(Value::String(text)) => split_text_todos(text),
+        Some(other) => normalize_todo_item(other).into_iter().collect(),
+        None => Vec::new(),
+    }
+}
+
+fn normalize_todo_response(raw: Value) -> Vec<TodoDraft> {
+    match raw {
+        Value::Array(items) => items.iter().filter_map(normalize_todo_item).take(12).collect(),
+        Value::Object(object) => normalize_todos(object.get("todos")).into_iter().take(12).collect(),
+        Value::String(text) => split_text_todos(&text).into_iter().take(12).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn normalize_todo_item(item: &Value) -> Option<TodoDraft> {
+    match item {
+        Value::String(title) => {
+            let title = title.trim();
+            if title.is_empty() {
+                None
+            } else {
+                Some(TodoDraft {
+                    title: title.to_string(),
+                    description: None,
+                    status: Some(TodoStatus::Todo),
+                    priority: Some(Priority::Medium),
+                    due_date: None,
+                    tags: Vec::new(),
+                })
+            }
+        }
+        Value::Array(values) => {
+            let title = values.iter().map(|value| value_to_string(Some(value))).collect::<Vec<_>>().join(" ");
+            normalize_todo_item(&Value::String(title))
+        }
+        Value::Object(todo) => {
+            let title = value_to_string(todo.get("title")).trim().to_string();
+            if title.is_empty() {
+                return None;
+            }
+            Some(TodoDraft {
+                title,
+                description: non_empty_string(todo.get("description")),
+                status: Some(normalize_todo_status(todo.get("status"))),
+                priority: Some(normalize_priority(todo.get("priority"))),
+                due_date: normalize_target_date(todo.get("dueDate").or_else(|| todo.get("due_date"))),
+                tags: normalize_tags(todo.get("tags")),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn split_text_todos(text: &str) -> Vec<TodoDraft> {
+    text.lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches(|ch: char| ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == '*' || ch == ' ')
+                .trim()
+        })
+        .filter(|line| !line.is_empty())
+        .map(|title| TodoDraft {
+            title: title.to_string(),
+            description: None,
+            status: Some(TodoStatus::Todo),
+            priority: Some(Priority::Medium),
+            due_date: None,
+            tags: Vec::new(),
+        })
+        .collect()
+}
+
 fn normalize_status(value: Option<&Value>) -> IdeaStatus {
     match value_to_string(value).trim() {
         "in_progress" => IdeaStatus::InProgress,
@@ -458,6 +664,24 @@ fn normalize_priority(value: Option<&Value>) -> Priority {
         "low" => Priority::Low,
         "high" => Priority::High,
         _ => Priority::Medium,
+    }
+}
+
+fn normalize_todo_status(value: Option<&Value>) -> TodoStatus {
+    match value_to_string(value).trim() {
+        "in_progress" => TodoStatus::InProgress,
+        "done" => TodoStatus::Done,
+        "cancelled" => TodoStatus::Cancelled,
+        _ => TodoStatus::Todo,
+    }
+}
+
+fn non_empty_string(value: Option<&Value>) -> Option<String> {
+    let text = value_to_string(value).trim().to_string();
+    if text.is_empty() || text == "null" {
+        None
+    } else {
+        Some(text)
     }
 }
 
@@ -491,13 +715,28 @@ fn normalize_progress(value: Option<&Value>) -> u8 {
 }
 
 fn extract_json_object(text: &str) -> Option<&str> {
+    extract_json_value(text).filter(|value| value.trim_start().starts_with('{'))
+}
+
+fn extract_json_value(text: &str) -> Option<&str> {
     let trimmed = text.trim();
-    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+    if (trimmed.starts_with('{') && trimmed.ends_with('}')) || (trimmed.starts_with('[') && trimmed.ends_with(']')) {
         return Some(trimmed);
     }
 
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
+    let object_start = trimmed.find('{');
+    let array_start = trimmed.find('[');
+    let start = match (object_start, array_start) {
+        (Some(object), Some(array)) => object.min(array),
+        (Some(object), None) => object,
+        (None, Some(array)) => array,
+        (None, None) => return None,
+    };
+    let end = if trimmed[start..].starts_with('{') {
+        trimmed.rfind('}')?
+    } else {
+        trimmed.rfind(']')?
+    };
     if start < end {
         Some(&trimmed[start..=end])
     } else {
@@ -569,13 +808,98 @@ fn anthropic_model_presets() -> Vec<String> {
     ]
 }
 
+fn open_path_with_system(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(path)
+            .status()
+            .map_err(|error| format!("Failed to open path: {}", error))?;
+        return command_status_to_result(status, "Failed to open path.");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("open")
+            .arg(path)
+            .status()
+            .map_err(|error| format!("Failed to open path: {}", error))?;
+        return command_status_to_result(status, "Failed to open path.");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let status = Command::new("xdg-open")
+            .arg(path)
+            .status()
+            .map_err(|error| format!("Failed to open path: {}", error))?;
+        return command_status_to_result(status, "Failed to open path.");
+    }
+
+    #[allow(unreachable_code)]
+    Err("Opening local paths is not supported on this platform.".to_string())
+}
+
+fn reveal_path_with_system(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let status = Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .status()
+            .map_err(|error| format!("Failed to reveal path: {}", error))?;
+        return command_status_to_result(status, "Failed to reveal path.");
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let status = Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .status()
+            .map_err(|error| format!("Failed to reveal path: {}", error))?;
+        return command_status_to_result(status, "Failed to reveal path.");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+        let status = Command::new("xdg-open")
+            .arg(target)
+            .status()
+            .map_err(|error| format!("Failed to reveal path: {}", error))?;
+        return command_status_to_result(status, "Failed to reveal path.");
+    }
+
+    #[allow(unreachable_code)]
+    Err("Revealing local paths is not supported on this platform.".to_string())
+}
+
+fn command_status_to_result(status: std::process::ExitStatus, error_message: &str) -> Result<(), String> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(error_message.to_string())
+    }
+}
+
 fn idea_system_prompt() -> &'static str {
-    r#"你是科研 idea 整理助手。必须只输出一个严格 JSON 对象，不要 markdown code block，不要解释文字。
+    r##"你是科研 idea 整理助手。必须只输出一个严格 JSON 对象，不要 markdown code block，不要解释文字。
 字段类型必须完全一致：
 {
   "title": "string",
   "content": "string",
   "plan": "string",
+  "todos": [
+    {
+      "title": "string",
+      "description": "string",
+      "status": "todo",
+      "priority": "medium",
+      "dueDate": null,
+      "tags": []
+    }
+  ],
   "repositories": [],
   "status": "not_started",
   "tags": ["string"],
@@ -591,11 +915,58 @@ fn idea_system_prompt() -> &'static str {
 4. notes 必须是 string，不要数组。
 5. tags 必须是 string array，控制在 3-8 个。
 6. repositories 必须是 array；repositories[].type 只能是 local_folder, local_file, github, overleaf, pdf, dataset, other。
-7. progress 必须是 number，默认 0。
-8. targetDate 可以是 string 或 null。
-9. status 默认 not_started，除非用户明确表示已经开始。
-10. priority 默认 medium。
-content 要包含研究背景、核心问题、可能创新点、技术路线；plan 要给可执行步骤；notes 写风险、假设或待确认问题。"#
+7. todos 必须是 array，给 3-8 个可执行任务；todo.status 只能是 todo, in_progress, done, cancelled；todo.priority 只能是 low, medium, high；dueDate 可以是 string 或 null。
+8. todos 是执行任务，不要写成泛泛的研究方向；plan 是研究路线说明，可以更宏观。
+9. progress 必须是 number，默认 0。
+10. targetDate 是 legacy 字段，默认 null，不要把它当核心输出。
+11. status 默认 not_started，除非用户明确表示已经开始。
+12. priority 默认 medium。
+content 要包含研究背景、核心问题、可能创新点、技术路线；plan 要给研究路线；todos 给可直接执行和勾选的任务；notes 写风险、假设或待确认问题。"##
+}
+
+fn project_todo_system_prompt() -> &'static str {
+    r##"You generate executable Project Todo items for a research idea. Output only a strict JSON object:
+{
+  "todos": [
+    {
+      "title": "string",
+      "description": "string",
+      "status": "todo",
+      "priority": "low | medium | high",
+      "dueDate": null,
+      "tags": []
+    }
+  ]
+}
+Rules:
+1. Return 3-8 concrete tasks that can be checked off.
+2. status must be todo unless the user explicitly says a task is already active or done.
+3. priority must be low, medium, or high.
+4. dueDate can be string or null.
+5. tags must be an array of short strings.
+6. Do not include research idea fields such as content, plan, repositories, hypotheses, or novelty in the JSON root."##
+}
+
+fn daily_todo_system_prompt() -> &'static str {
+    r##"You organize general daily tasks. Output only a strict JSON object:
+{
+  "todos": [
+    {
+      "title": "string",
+      "description": "string",
+      "status": "todo",
+      "priority": "low | medium | high",
+      "dueDate": null,
+      "tags": []
+    }
+  ]
+}
+Rules:
+1. Return practical daily tasks, not research idea summaries.
+2. Keep titles short and executable.
+3. Use tags for categories such as work, study, health, errand, home, or custom terms from the user.
+4. status must be todo unless the user explicitly says a task is active or done.
+5. Do not include content, plan, repositories, hypotheses, innovation, or literature-route fields."##
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -607,7 +978,12 @@ pub fn run() {
             fetch_llm_models,
             test_llm_connection,
             generate_idea_with_ai,
-            organize_idea_with_ai
+            organize_idea_with_ai,
+            generate_project_todos_with_ai,
+            generate_daily_todos_with_ai,
+            path_exists,
+            open_local_path,
+            reveal_in_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running NEW IDEAS");
@@ -658,5 +1034,43 @@ mod tests {
         assert!(matches!(draft.status, IdeaStatus::InProgress));
         assert!(matches!(draft.priority, Priority::High));
         assert_eq!(draft.progress, Some(0));
+    }
+
+    #[test]
+    fn normalizes_ai_generated_todos() {
+        let raw = json!({
+            "title": "转轮除湿实验计划",
+            "content": "研究实验工况对模型辨识的影响。",
+            "plan": "1. 设计工况\n2. 采集数据\n3. 验证模型",
+            "todos": [
+                {
+                    "title": "整理 10 篇相关论文",
+                    "description": "记录模型、数据和实验工况。",
+                    "status": "done",
+                    "priority": "high",
+                    "dueDate": null
+                },
+                {
+                    "title": "搭建数据清洗脚本",
+                    "status": "unknown",
+                    "priority": "unknown",
+                    "due_date": "2026-06-01"
+                }
+            ],
+            "repositories": [],
+            "status": "not_started",
+            "tags": ["转轮除湿", "实验"],
+            "priority": "medium",
+            "progress": 0,
+            "notes": ""
+        });
+
+        let draft = normalize_idea_draft(raw).expect("todos should normalize");
+        assert_eq!(draft.todos.len(), 2);
+        assert!(matches!(draft.todos[0].status, Some(TodoStatus::Done)));
+        assert!(matches!(draft.todos[0].priority, Some(Priority::High)));
+        assert!(matches!(draft.todos[1].status, Some(TodoStatus::Todo)));
+        assert!(matches!(draft.todos[1].priority, Some(Priority::Medium)));
+        assert_eq!(draft.todos[1].due_date.as_deref(), Some("2026-06-01"));
     }
 }

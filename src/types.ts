@@ -2,6 +2,52 @@ export type IdeaStatus = "not_started" | "in_progress" | "completed" | "abandone
 
 export type Priority = "low" | "medium" | "high";
 
+export type TodoStatus = "todo" | "in_progress" | "done" | "cancelled";
+
+export type DailyTodoStatus = TodoStatus;
+
+export interface TodoItem {
+  id: string;
+  title: string;
+  description?: string;
+  status: TodoStatus;
+  priority: Priority;
+  tags?: string[];
+  createdAt: string;
+  updatedAt: string;
+  dueDate?: string;
+  completedAt?: string;
+  order: number;
+  source?: {
+    type: "daily_todo";
+    id: string;
+    date: string;
+  };
+}
+
+export interface TodoDraft {
+  title: string;
+  description?: string;
+  status?: TodoStatus;
+  priority?: Priority;
+  dueDate?: string | null;
+  tags?: string[];
+}
+
+export interface DailyTodo {
+  id: string;
+  title: string;
+  description?: string;
+  status: DailyTodoStatus;
+  priority: Priority;
+  date: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  tags: string[];
+  order: number;
+}
+
 export type RepositoryType =
   | "local_folder"
   | "local_file"
@@ -27,12 +73,14 @@ export interface Idea {
   title: string;
   content: string;
   plan: string;
+  todos: TodoItem[];
   repositories: RelatedRepository[];
   status: IdeaStatus;
   tags: string[];
   priority: Priority;
   createdAt: string;
   updatedAt: string;
+  /** Legacy field kept for imported/old records. It is no longer shown in the core UI. */
   targetDate?: string;
   progress?: number;
   notes?: string;
@@ -42,10 +90,12 @@ export interface IdeaDraft {
   title: string;
   content: string;
   plan: string;
+  todos: TodoDraft[];
   repositories: Omit<RelatedRepository, "id">[];
   status: IdeaStatus;
   tags: string[];
   priority: Priority;
+  /** Legacy field kept for backwards-compatible imports and AI responses. */
   targetDate?: string;
   progress?: number;
   notes?: string;
@@ -72,20 +122,26 @@ export interface TestConnectionResult {
 
 export interface AppSettings {
   theme: ThemeMode;
+  language: Language;
   llm: LlmSettings;
 }
 
 export interface StorageMigrationState {
   localStorageV1Completed: boolean;
   completedAt?: string;
+  schemaVersion?: number;
 }
 
 export interface AppData {
+  schemaVersion: number;
   ideas: Idea[];
+  dailyTodos: DailyTodo[];
   settings: AppSettings;
   migration: StorageMigrationState;
 }
 
-export type ViewMode = "dashboard" | "list" | "board" | "settings";
+export type AppMode = "research" | "daily";
+export type ViewMode = "dashboard" | "list" | "board" | "daily" | "settings";
 export type SortMode = "updated_desc" | "priority_desc" | "created_desc" | "title_asc";
 export type ThemeMode = "light" | "dark";
+export type Language = "en" | "zh";
