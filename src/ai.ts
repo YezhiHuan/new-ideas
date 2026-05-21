@@ -50,8 +50,9 @@ export function draftTodosToDailyTodos(drafts: TodoDraft[], date: string, startO
       createdAt: now,
       updatedAt: now,
       completedAt: status === "done" ? now : undefined,
-      tags: normalizeTags(todo.tags ?? []),
-      order: startOrder + index,
+    tags: normalizeTags(todo.tags ?? []),
+    order: startOrder + index,
+    linkedProjectTodos: [],
     };
   });
 }
@@ -61,7 +62,10 @@ export function ideaToDraft(idea: Idea): IdeaDraft {
     title: idea.title,
     content: idea.content,
     plan: idea.plan,
-    todos: idea.todos.map(({ id: _id, createdAt: _createdAt, updatedAt: _updatedAt, completedAt: _completedAt, order: _order, ...todo }) => todo),
+    todos: idea.todos.map(
+      ({ id: _id, createdAt: _createdAt, updatedAt: _updatedAt, completedAt: _completedAt, order: _order, link: _link, source: _source, ...todo }) =>
+        todo,
+    ),
     repositories: idea.repositories.map(({ id: _id, ...repo }) => repo),
     status: idea.status,
     tags: idea.tags,
@@ -99,6 +103,7 @@ export function draftToIdea(draft: IdeaDraft, baseIdea?: Idea): Idea {
     notes: draft.notes?.trim() || undefined,
     createdAt: baseIdea?.createdAt ?? now,
     updatedAt: baseIdea?.updatedAt ?? now,
+    order: baseIdea?.order ?? 0,
   };
 }
 

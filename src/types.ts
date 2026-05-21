@@ -6,6 +6,17 @@ export type TodoStatus = "todo" | "in_progress" | "done" | "cancelled";
 
 export type DailyTodoStatus = TodoStatus;
 
+export interface TodoLink {
+  type: "daily_todo";
+  dailyTodoId: string;
+  dailyTodoDate: string;
+}
+
+export interface LinkedProjectTodo {
+  ideaId: string;
+  todoId: string;
+}
+
 export interface TodoItem {
   id: string;
   title: string;
@@ -18,6 +29,8 @@ export interface TodoItem {
   dueDate?: string;
   completedAt?: string;
   order: number;
+  link?: TodoLink;
+  /** Legacy field kept for older imported records. New linked todos use `link`. */
   source?: {
     type: "daily_todo";
     id: string;
@@ -46,6 +59,7 @@ export interface DailyTodo {
   completedAt?: string;
   tags: string[];
   order: number;
+  linkedProjectTodos?: LinkedProjectTodo[];
 }
 
 export type RepositoryType =
@@ -80,6 +94,7 @@ export interface Idea {
   priority: Priority;
   createdAt: string;
   updatedAt: string;
+  order: number;
   /** Legacy field kept for imported/old records. It is no longer shown in the core UI. */
   targetDate?: string;
   progress?: number;

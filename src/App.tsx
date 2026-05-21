@@ -60,7 +60,7 @@ import {
   testLlmConnection,
 } from "./ai";
 import { createTranslator, I18nProvider, useI18n } from "./i18n";
-import { defaultSettings, exportIdeas, importIdeasFromFile, loadAppData, saveDailyTodos, saveIdeas, saveSettings } from "./storage";
+import { defaultSettings, exportData, importDataFromFile, loadAppData, saveDailyTodos, saveIdeas, saveSettings } from "./storage";
 import type {
   AppMode,
   AppSettings,
@@ -69,6 +69,7 @@ import type {
   Idea,
   IdeaDraft,
   IdeaStatus,
+  LinkedProjectTodo,
   LlmSettings,
   Priority,
   RelatedRepository,
@@ -166,6 +167,117 @@ function validateLlmSettings(settings: LlmSettings, options: { requireModel: boo
   return "";
 }
 
+function normalizeLinkedProjectTodos(links: LinkedProjectTodo[] | undefined) {
+  const seen = new Set<string>();
+  return (links ?? []).filter((link) => {
+    const key = `${link.ideaId}:${link.todoId}`;
+    if (!link.ideaId || !link.todoId || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function addLinkedProjectTodo(links: LinkedProjectTodo[] | undefined, link: LinkedProjectTodo) {
+  return normalizeLinkedProjectTodos([...(links ?? []), link]);
+}
+
+function removeLinkedProjectTodo(links: LinkedProjectTodo[] | undefined, link: LinkedProjectTodo) {
+  return normalizeLinkedProjectTodos(links).filter((item) => item.ideaId !== link.ideaId || item.todoId !== link.todoId);
+}
+
+function linkedDailyFieldsFromProject(todo: TodoItem, daily: DailyTodo, link: LinkedProjectTodo, now: string): DailyTodo {
+  return {
+    ...daily,
+    title: todo.title,
+    description: todo.description,
+    status: todo.status,
+    priority: todo.priority,
+    tags: normalizeTags(todo.tags ?? []),
+    completedAt: todo.status === "done" ? todo.completedAt || now : undefined,
+    updatedAt: now,
+    linkedProjectTodos: addLinkedProjectTodo(daily.linkedProjectTodos, link),
+  };
+}
+
+function linkedProjectFieldsFromDaily(daily: DailyTodo, todo: TodoItem, now: string): TodoItem {
+  return {
+    ...todo,
+    title: daily.title,
+    description: daily.description,
+    status: normalizeTodoStatus(daily.status),
+    priority: normalizePriority(daily.priority),
+    tags: normalizeTags(daily.tags),
+    completedAt: daily.status === "done" ? daily.completedAt || now : undefined,
+    updatedAt: now,
+  };
+}
+
+function reorderIdeasForDrop(ideas: Idea[], draggedId: string, targetStatus: IdeaStatus, overId?: string) {
+  const dragged = ideas.find((idea) => idea.id === draggedId);
+  if (!dragged) return ideas;
+  const now = new Date().toISOString();
+  const withoutDragged = ideas.filter((idea) => idea.id !== draggedId);
+  const nextDragged = { ...dragged, status: targetStatus, updatedAt: now };
+  const grouped = new Map<IdeaStatus, Idea[]>();
+  statusOrder.forEach((status) => {
+    grouped.set(
+      status,
+      withoutDragged
+        .filter((idea) => idea.status === status)
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
+    );
+  });
+  const targetGroup = [...(grouped.get(targetStatus) ?? [])];
+  const overIndex = overId ? targetGroup.findIndex((idea) => idea.id === overId) : -1;
+  targetGroup.splice(overIndex >= 0 ? overIndex : targetGroup.length, 0, nextDragged);
+  grouped.set(targetStatus, targetGroup);
+
+  const byId = new Map<string, Idea>();
+  statusOrder.forEach((status) => {
+    (grouped.get(status) ?? []).forEach((idea, order) => {
+      byId.set(idea.id, { ...idea, order });
+    });
+  });
+  return ideas.map((idea) => byId.get(idea.id) ?? idea);
+}
+
+function reorderTodosForDrop<T extends { id: string; status: TodoStatus; order: number; updatedAt: string; completedAt?: string }>(
+  todos: T[],
+  draggedId: string,
+  targetStatus: TodoStatus,
+  overId?: string,
+) {
+  const dragged = todos.find((todo) => todo.id === draggedId);
+  if (!dragged) return todos;
+  const now = new Date().toISOString();
+  const withoutDragged = todos.filter((todo) => todo.id !== draggedId);
+  const nextDragged = {
+    ...dragged,
+    status: targetStatus,
+    completedAt: targetStatus === "done" ? dragged.completedAt || now : undefined,
+    updatedAt: now,
+  };
+  const grouped = new Map<TodoStatus, T[]>();
+  todoStatusOrder.forEach((status) => {
+    grouped.set(
+      status,
+      withoutDragged.filter((todo) => todo.status === status).sort((a, b) => a.order - b.order),
+    );
+  });
+  const targetGroup = [...(grouped.get(targetStatus) ?? [])];
+  const overIndex = overId ? targetGroup.findIndex((todo) => todo.id === overId) : -1;
+  targetGroup.splice(overIndex >= 0 ? overIndex : targetGroup.length, 0, nextDragged as T);
+  grouped.set(targetStatus, targetGroup);
+
+  const byId = new Map<string, T>();
+  todoStatusOrder.forEach((status) => {
+    (grouped.get(status) ?? []).forEach((todo, order) => {
+      byId.set(todo.id, { ...todo, order } as T);
+    });
+  });
+  return todos.map((todo) => byId.get(todo.id) ?? todo);
+}
+
 const createBlankIdea = (): Idea => {
   const now = new Date().toISOString();
   return {
@@ -180,6 +292,7 @@ const createBlankIdea = (): Idea => {
     priority: "medium",
     createdAt: now,
     updatedAt: now,
+    order: 0,
     progress: 0,
   };
 };
@@ -230,8 +343,14 @@ export default function App() {
   const [editingIdea, setEditingIdea] = useState<Idea | null>(null);
   const [editingDailyTodo, setEditingDailyTodo] = useState<DailyTodo | null>(null);
   const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [localNotice, setLocalNotice] = useState("");
   const importInputRef = useRef<HTMLInputElement>(null);
   const t = useMemo(() => createTranslator(settings.language), [settings.language]);
+
+  function showLocalNotice(message: string) {
+    setLocalNotice(message);
+    window.setTimeout(() => setLocalNotice((current) => (current === message ? "" : current)), 3600);
+  }
 
   useEffect(() => {
     let active = true;
@@ -318,6 +437,7 @@ export default function App() {
       repositories: idea.repositories.filter((repo) => repo.name.trim() || repo.urlOrPath.trim()),
       updatedAt: now,
       createdAt: idea.createdAt || now,
+      order: Number.isFinite(idea.order) ? idea.order : ideas.length,
     };
     const normalizedWithProgress = withCalculatedIdeaProgress(normalized);
 
@@ -337,6 +457,10 @@ export default function App() {
     );
   }
 
+  function moveIdeaOnBoard(id: string, status: IdeaStatus, overId?: string) {
+    setIdeas((current) => reorderIdeasForDrop(current, id, status, overId));
+  }
+
   function deleteIdea(id: string) {
     const target = ideas.find((idea) => idea.id === id);
     if (!target) return;
@@ -348,10 +472,16 @@ export default function App() {
   }
 
   function saveProjectTodo(ideaId: string, todo: TodoItem) {
-    setIdeas((current) =>
-      current.map((idea) => {
+    const now = new Date().toISOString();
+    const link = todo.link?.type === "daily_todo" ? todo.link : undefined;
+    const linkedDaily = link ? dailyTodos.find((item) => item.id === link.dailyTodoId && item.date === link.dailyTodoDate) : undefined;
+    if (link && !linkedDaily) {
+      showLocalNotice(t("link.missingDaily"));
+    }
+
+    let normalizedForLink: TodoItem | null = null;
+    const nextIdeas = ideas.map((idea) => {
         if (idea.id !== ideaId) return idea;
-        const now = new Date().toISOString();
         const todos = idea.todos ?? [];
         const status = normalizeTodoStatus(todo.status);
         const normalizedTodo: TodoItem = {
@@ -364,37 +494,79 @@ export default function App() {
           completedAt: status === "done" ? todo.completedAt || now : undefined,
           updatedAt: now,
           order: Number.isFinite(todo.order) ? todo.order : todos.length,
+          link: linkedDaily ? link : undefined,
         };
+        normalizedForLink = normalizedTodo;
         const exists = todos.some((item) => item.id === normalizedTodo.id);
         const nextTodos = exists
           ? todos.map((item) => (item.id === normalizedTodo.id ? normalizedTodo : item))
           : [...todos, normalizedTodo];
         return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
-      }),
-    );
+      });
+    setIdeas(nextIdeas);
+
+    if (linkedDaily && normalizedForLink) {
+      setDailyTodos((current) =>
+        sortDailyTodos(
+          current.map((item) =>
+            item.id === linkedDaily.id && item.date === linkedDaily.date
+              ? linkedDailyFieldsFromProject(normalizedForLink as TodoItem, item, { ideaId, todoId: (normalizedForLink as TodoItem).id }, now)
+              : item,
+          ),
+        ),
+      );
+    }
   }
 
   function changeProjectTodoStatus(ideaId: string, todoId: string, status: TodoStatus) {
-    setIdeas((current) =>
-      current.map((idea) => {
+    let linkedUpdate: TodoItem | null = null;
+    const nextIdeas = ideas.map((idea) => {
         if (idea.id !== ideaId) return idea;
         const now = new Date().toISOString();
-        const nextTodos = (idea.todos ?? []).map((todo) =>
-          todo.id === todoId
-            ? {
-                ...todo,
-                status,
-                completedAt: status === "done" ? todo.completedAt || now : undefined,
-                updatedAt: now,
-              }
-            : todo,
-        );
+        const nextTodos = (idea.todos ?? []).map((todo) => {
+          if (todo.id !== todoId) return todo;
+          const nextTodo = {
+            ...todo,
+            status,
+            completedAt: status === "done" ? todo.completedAt || now : undefined,
+            updatedAt: now,
+          };
+          linkedUpdate = nextTodo;
+          return nextTodo;
+        });
         return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
-      }),
-    );
+      });
+    setIdeas(nextIdeas);
+    const projectUpdate = linkedUpdate as TodoItem | null;
+    if (projectUpdate?.link) {
+      const link = projectUpdate.link;
+      const target = dailyTodos.find((todo) => todo.id === link.dailyTodoId && todo.date === link.dailyTodoDate);
+      if (!target) {
+        showLocalNotice(t("link.missingDaily"));
+        unlinkProjectTodo(ideaId, todoId);
+        return;
+      }
+      const now = new Date().toISOString();
+      setDailyTodos((current) =>
+        sortDailyTodos(current.map((todo) => (todo.id === target.id ? linkedDailyFieldsFromProject(projectUpdate, todo, { ideaId, todoId }, now) : todo))),
+      );
+    }
   }
 
   function deleteProjectTodo(ideaId: string, todoId: string) {
+    const targetIdea = ideas.find((idea) => idea.id === ideaId);
+    const targetTodo = targetIdea?.todos.find((todo) => todo.id === todoId);
+    if (!targetTodo) return;
+    if (targetTodo.link) {
+      const choice = chooseLinkedDelete();
+      if (choice === "cancel") return;
+      if (choice === "unlink") {
+        unlinkProjectTodo(ideaId, todoId);
+        return;
+      }
+      deleteLinkedProjectTodoPair(ideaId, todoId, targetTodo.link.dailyTodoId);
+      return;
+    }
     if (!window.confirm(t("error.deleteProjectTodo"))) return;
     setIdeas((current) =>
       current.map((idea) => {
@@ -406,6 +578,68 @@ export default function App() {
         return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
       }),
     );
+  }
+
+  function chooseLinkedDelete(): "unlink" | "deleteBoth" | "cancel" {
+    const answer = window.prompt(t("link.deletePrompt"), "1");
+    if (answer === null || answer.trim() === "3") return "cancel";
+    if (answer.trim() === "2") return "deleteBoth";
+    return "unlink";
+  }
+
+  function unlinkProjectTodo(ideaId: string, todoId: string) {
+    const removedDailyId = ideas.find((idea) => idea.id === ideaId)?.todos.find((todo) => todo.id === todoId)?.link?.dailyTodoId ?? "";
+    setIdeas((current) =>
+      current.map((idea) => {
+        if (idea.id !== ideaId) return idea;
+        const now = new Date().toISOString();
+        const nextTodos = (idea.todos ?? []).map((todo) => {
+          if (todo.id !== todoId) return todo;
+          return { ...todo, link: undefined, updatedAt: now };
+        });
+        return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+      }),
+    );
+    if (removedDailyId) {
+      setDailyTodos((current) =>
+        sortDailyTodos(
+          current.map((todo) =>
+            todo.id === removedDailyId
+              ? { ...todo, linkedProjectTodos: removeLinkedProjectTodo(todo.linkedProjectTodos, { ideaId, todoId }), updatedAt: new Date().toISOString() }
+              : todo,
+          ),
+        ),
+      );
+    }
+  }
+
+  function unlinkDailyTodo(id: string) {
+    const target = dailyTodos.find((todo) => todo.id === id);
+    if (!target) return;
+    const links = normalizeLinkedProjectTodos(target.linkedProjectTodos);
+    setDailyTodos((current) => sortDailyTodos(current.map((todo) => (todo.id === id ? { ...todo, linkedProjectTodos: [], updatedAt: new Date().toISOString() } : todo))));
+    if (links.length) {
+      setIdeas((current) =>
+        current.map((idea) => {
+          const nextTodos = (idea.todos ?? []).map((todo) =>
+            links.some((link) => link.ideaId === idea.id && link.todoId === todo.id) ? { ...todo, link: undefined, updatedAt: new Date().toISOString() } : todo,
+          );
+          return nextTodos === idea.todos ? idea : withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: new Date().toISOString() });
+        }),
+      );
+    }
+  }
+
+  function deleteLinkedProjectTodoPair(ideaId: string, todoId: string, dailyTodoId: string) {
+    setIdeas((current) =>
+      current.map((idea) => {
+        if (idea.id !== ideaId) return idea;
+        const now = new Date().toISOString();
+        const nextTodos = (idea.todos ?? []).filter((todo) => todo.id !== todoId).map((todo, index) => ({ ...todo, order: index }));
+        return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+      }),
+    );
+    setDailyTodos((current) => sortDailyTodos(current.filter((todo) => todo.id !== dailyTodoId)));
   }
 
   function moveProjectTodo(ideaId: string, todoId: string, direction: -1 | 1) {
@@ -427,9 +661,41 @@ export default function App() {
     );
   }
 
+  function moveProjectTodoToStatus(ideaId: string, todoId: string, status: TodoStatus, overId?: string) {
+    let linkedUpdate: TodoItem | null = null;
+    const nextIdeas = ideas.map((idea) => {
+        if (idea.id !== ideaId) return idea;
+        const now = new Date().toISOString();
+        const nextTodos = reorderTodosForDrop(idea.todos ?? [], todoId, status, overId);
+        linkedUpdate = nextTodos.find((todo) => todo.id === todoId) ?? null;
+        return withCalculatedIdeaProgress({ ...idea, todos: nextTodos.map((todo) => ({ ...todo, updatedAt: todo.id === todoId ? now : todo.updatedAt })), updatedAt: now });
+      });
+    setIdeas(nextIdeas);
+    const projectUpdate = linkedUpdate as TodoItem | null;
+    if (projectUpdate?.link) {
+      const link = projectUpdate.link;
+      const target = dailyTodos.find((todo) => todo.id === link.dailyTodoId && todo.date === link.dailyTodoDate);
+      if (!target) {
+        showLocalNotice(t("link.missingDaily"));
+        unlinkProjectTodo(ideaId, todoId);
+        return;
+      }
+      const now = new Date().toISOString();
+      setDailyTodos((current) =>
+        sortDailyTodos(current.map((todo) => (todo.id === target.id ? linkedDailyFieldsFromProject(projectUpdate, todo, { ideaId, todoId }, now) : todo))),
+      );
+    }
+  }
+
   function saveDailyTodo(todo: DailyTodo) {
     const now = new Date().toISOString();
     const status = normalizeTodoStatus(todo.status);
+    const validLinks = normalizeLinkedProjectTodos(todo.linkedProjectTodos).filter((link) =>
+      ideas.some((idea) => idea.id === link.ideaId && idea.todos.some((projectTodo) => projectTodo.id === link.todoId)),
+    );
+    if ((todo.linkedProjectTodos ?? []).length !== validLinks.length) {
+      showLocalNotice(t("link.missingProject"));
+    }
     const normalizedTodo: DailyTodo = {
       ...todo,
       title: todo.title.trim() || "未命名任务",
@@ -442,32 +708,83 @@ export default function App() {
       createdAt: todo.createdAt || now,
       updatedAt: now,
       order: Number.isFinite(todo.order) ? todo.order : dailyTodos.filter((item) => item.date === (todo.date || selectedDailyDate)).length,
+      linkedProjectTodos: validLinks,
     };
     setDailyTodos((current) => {
       const exists = current.some((item) => item.id === normalizedTodo.id);
       return sortDailyTodos(exists ? current.map((item) => (item.id === normalizedTodo.id ? normalizedTodo : item)) : [...current, normalizedTodo]);
     });
+    if (validLinks.length) {
+      setIdeas((current) =>
+        current.map((idea) => {
+          const nextTodos = (idea.todos ?? []).map((projectTodo) =>
+            validLinks.some((link) => link.ideaId === idea.id && link.todoId === projectTodo.id)
+              ? linkedProjectFieldsFromDaily(normalizedTodo, projectTodo, now)
+              : projectTodo,
+          );
+          return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+        }),
+      );
+    }
     setEditingDailyTodo(null);
   }
 
   function changeDailyTodoStatus(id: string, status: DailyTodoStatus) {
-    setDailyTodos((current) =>
-      sortDailyTodos(
-        current.map((todo) => {
+    let changedTodo: DailyTodo | null = null;
+    const nextDailyTodos = sortDailyTodos(
+        dailyTodos.map((todo) => {
           if (todo.id !== id) return todo;
           const now = new Date().toISOString();
-          return {
+          changedTodo = {
             ...todo,
             status,
             completedAt: status === "done" ? todo.completedAt || now : undefined,
             updatedAt: now,
           };
+          return changedTodo;
         }),
-      ),
     );
+    setDailyTodos(nextDailyTodos);
+    const dailyUpdate = changedTodo as DailyTodo | null;
+    if (dailyUpdate?.linkedProjectTodos?.length) {
+      const now = new Date().toISOString();
+      const validLinks = normalizeLinkedProjectTodos(dailyUpdate.linkedProjectTodos);
+      setIdeas((current) =>
+        current.map((idea) => {
+          const nextTodos = (idea.todos ?? []).map((projectTodo) =>
+            validLinks.some((link) => link.ideaId === idea.id && link.todoId === projectTodo.id)
+              ? linkedProjectFieldsFromDaily(dailyUpdate, projectTodo, now)
+              : projectTodo,
+          );
+          return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+        }),
+      );
+    }
   }
 
   function deleteDailyTodo(id: string) {
+    const target = dailyTodos.find((todo) => todo.id === id);
+    if (!target) return;
+    const links = normalizeLinkedProjectTodos(target.linkedProjectTodos);
+    if (links.length) {
+      const choice = chooseLinkedDelete();
+      if (choice === "cancel") return;
+      if (choice === "unlink") {
+        unlinkDailyTodo(id);
+        return;
+      }
+      setDailyTodos((current) => current.filter((todo) => todo.id !== id));
+      setIdeas((current) =>
+        current.map((idea) => {
+          const now = new Date().toISOString();
+          const nextTodos = (idea.todos ?? [])
+            .filter((projectTodo) => !links.some((link) => link.ideaId === idea.id && link.todoId === projectTodo.id))
+            .map((projectTodo, index) => ({ ...projectTodo, order: index }));
+          return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+        }),
+      );
+      return;
+    }
     if (!window.confirm(t("error.deleteDailyTodo"))) return;
     setDailyTodos((current) => current.filter((todo) => todo.id !== id));
   }
@@ -491,19 +808,54 @@ export default function App() {
     });
   }
 
-  function clearDoneDailyTodos(date: string) {
-    if (!window.confirm(t("error.clearDone"))) return;
-    setDailyTodos((current) => current.filter((todo) => todo.date !== date || todo.status !== "done"));
+  function moveDailyTodoToStatus(id: string, status: DailyTodoStatus, overId?: string) {
+    let changedTodo: DailyTodo | null = null;
+    const target = dailyTodos.find((todo) => todo.id === id);
+    if (!target) return;
+    const sameDate = dailyTodos.filter((todo) => todo.date === target.date);
+      const movedSameDate = reorderTodosForDrop(sameDate, id, status, overId);
+      changedTodo = movedSameDate.find((todo) => todo.id === id) ?? null;
+      const byId = new Map(movedSameDate.map((todo) => [todo.id, todo]));
+    setDailyTodos(sortDailyTodos(dailyTodos.map((todo) => byId.get(todo.id) ?? todo)));
+    const dailyUpdate = changedTodo as DailyTodo | null;
+    if (dailyUpdate?.linkedProjectTodos?.length) {
+      const now = new Date().toISOString();
+      const validLinks = normalizeLinkedProjectTodos(dailyUpdate.linkedProjectTodos);
+      setIdeas((current) =>
+        current.map((idea) => {
+          const nextTodos = (idea.todos ?? []).map((projectTodo) =>
+            validLinks.some((link) => link.ideaId === idea.id && link.todoId === projectTodo.id)
+              ? linkedProjectFieldsFromDaily(dailyUpdate, projectTodo, now)
+              : projectTodo,
+          );
+          return withCalculatedIdeaProgress({ ...idea, todos: nextTodos, updatedAt: now });
+        }),
+      );
+    }
   }
 
-  function importDailyTodosToIdea(ideaId: string, selectedTodos: DailyTodo[]) {
+  function clearDoneDailyTodos(date: string) {
+    if (!window.confirm(t("error.clearDone"))) return;
+    const linkedDoneCount = dailyTodos.filter((todo) => todo.date === date && todo.status === "done" && normalizeLinkedProjectTodos(todo.linkedProjectTodos).length > 0).length;
+    if (linkedDoneCount) showLocalNotice(t("link.clearDoneSkipped", { count: linkedDoneCount }));
+    setDailyTodos((current) =>
+      current.filter((todo) => todo.date !== date || todo.status !== "done" || normalizeLinkedProjectTodos(todo.linkedProjectTodos).length > 0),
+    );
+  }
+
+  function importDailyTodosToIdea(ideaId: string, selectedTodos: DailyTodo[], linked: boolean) {
     if (selectedTodos.length === 0) return;
+    const createdLinks: Array<{ dailyId: string; projectTodoId: string }> = [];
     setIdeas((current) =>
       current.map((idea) => {
         if (idea.id !== ideaId) return idea;
         const now = new Date().toISOString();
         const startOrder = (idea.todos ?? []).length;
-        const importedTodos = selectedTodos.map((todo, index) => projectTodoFromDailyTodo(todo, startOrder + index));
+        const importedTodos = selectedTodos.map((todo, index) => {
+          const projectTodo = projectTodoFromDailyTodo(todo, startOrder + index, linked);
+          if (linked) createdLinks.push({ dailyId: todo.id, projectTodoId: projectTodo.id });
+          return projectTodo;
+        });
         return withCalculatedIdeaProgress({
           ...idea,
           todos: [...(idea.todos ?? []), ...importedTodos],
@@ -511,15 +863,26 @@ export default function App() {
         });
       }),
     );
+    if (linked && createdLinks.length) {
+      setDailyTodos((current) =>
+        sortDailyTodos(
+          current.map((todo) => {
+            const link = createdLinks.find((item) => item.dailyId === todo.id);
+            return link ? { ...todo, linkedProjectTodos: addLinkedProjectTodo(todo.linkedProjectTodos, { ideaId, todoId: link.projectTodoId }) } : todo;
+          }),
+        ),
+      );
+    }
   }
 
   async function handleImport(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     try {
-      const imported = await importIdeasFromFile(file);
-      setIdeas(imported);
-      setSelectedId(imported[0]?.id ?? "");
+      const imported = await importDataFromFile(file);
+      setIdeas(imported.ideas);
+      setDailyTodos(imported.dailyTodos);
+      setSelectedId(imported.ideas[0]?.id ?? "");
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "导入失败。");
     } finally {
@@ -618,7 +981,7 @@ export default function App() {
             ideas={filteredIdeas}
             onSelect={(idea) => setSelectedId(idea.id)}
             onEdit={(idea) => setEditingIdea(idea)}
-            onStatusChange={changeIdeaStatus}
+            onMoveIdea={moveIdeaOnBoard}
           />
         )}
 
@@ -641,6 +1004,7 @@ export default function App() {
               onChangeTodoStatus={changeProjectTodoStatus}
               onDeleteTodo={deleteProjectTodo}
               onMoveTodo={moveProjectTodo}
+              onDropTodo={moveProjectTodoToStatus}
               dailyTodos={dailyTodos}
               onImportDailyTodos={importDailyTodosToIdea}
               llmSettings={settings.llm}
@@ -666,6 +1030,7 @@ export default function App() {
             onStatusChange={changeDailyTodoStatus}
             onDeleteTodo={deleteDailyTodo}
             onMoveTodo={moveDailyTodo}
+            onDropTodo={moveDailyTodoToStatus}
             onClearDone={clearDoneDailyTodos}
             onAddAiTodos={(drafts) => {
               const generated = draftTodosToDailyTodos(
@@ -684,13 +1049,15 @@ export default function App() {
             settings={settings}
             ideaCount={ideas.length}
             onSettingsChange={setSettings}
-            onExport={() => exportIdeas(ideas)}
+            onExport={() => exportData(ideas, dailyTodos)}
             onImport={() => importInputRef.current?.click()}
           />
         )}
       </section>
 
       <input ref={importInputRef} type="file" accept="application/json,.json" className="hidden" onChange={handleImport} />
+
+      {localNotice && <div className="local-notice">{localNotice}</div>}
 
       {aiModalOpen && (
         <AIIdeaModal
@@ -1125,6 +1492,7 @@ function IdeaDetail({
   onChangeTodoStatus,
   onDeleteTodo,
   onMoveTodo,
+  onDropTodo,
   dailyTodos,
   onImportDailyTodos,
   llmSettings,
@@ -1141,8 +1509,9 @@ function IdeaDetail({
   onChangeTodoStatus: (ideaId: string, todoId: string, status: TodoStatus) => void;
   onDeleteTodo: (ideaId: string, todoId: string) => void;
   onMoveTodo: (ideaId: string, todoId: string, direction: -1 | 1) => void;
+  onDropTodo: (ideaId: string, todoId: string, status: TodoStatus, overId?: string) => void;
   dailyTodos: DailyTodo[];
-  onImportDailyTodos: (ideaId: string, todos: DailyTodo[]) => void;
+  onImportDailyTodos: (ideaId: string, todos: DailyTodo[], linked: boolean) => void;
   llmSettings: LlmSettings;
   onOpenRepository: (repo: RelatedRepository) => void;
   onCopyRepository: (repo: RelatedRepository) => void;
@@ -1222,6 +1591,7 @@ function IdeaDetail({
         onChangeTodoStatus={onChangeTodoStatus}
         onDeleteTodo={onDeleteTodo}
         onMoveTodo={onMoveTodo}
+        onDropTodo={onDropTodo}
         dailyTodos={dailyTodos}
         onImportDailyTodos={onImportDailyTodos}
         llmSettings={llmSettings}
@@ -1279,6 +1649,7 @@ function ProjectTodoSection({
   onChangeTodoStatus,
   onDeleteTodo,
   onMoveTodo,
+  onDropTodo,
   dailyTodos,
   onImportDailyTodos,
   llmSettings,
@@ -1288,14 +1659,16 @@ function ProjectTodoSection({
   onChangeTodoStatus: (ideaId: string, todoId: string, status: TodoStatus) => void;
   onDeleteTodo: (ideaId: string, todoId: string) => void;
   onMoveTodo: (ideaId: string, todoId: string, direction: -1 | 1) => void;
+  onDropTodo: (ideaId: string, todoId: string, status: TodoStatus, overId?: string) => void;
   dailyTodos: DailyTodo[];
-  onImportDailyTodos: (ideaId: string, todos: DailyTodo[]) => void;
+  onImportDailyTodos: (ideaId: string, todos: DailyTodo[], linked: boolean) => void;
   llmSettings: LlmSettings;
 }) {
   const t = useI18n();
   const [editingTodo, setEditingTodo] = useState<TodoItem | null>(null);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [dailyImportOpen, setDailyImportOpen] = useState(false);
+  const [draggedTodoId, setDraggedTodoId] = useState<string | null>(null);
   const todos = [...(idea.todos ?? [])].sort((a, b) => a.order - b.order);
   const summary = todoCompletionSummary(todos);
 
@@ -1335,19 +1708,47 @@ function ProjectTodoSection({
       {todos.length === 0 ? (
         <p className="muted-text">{t("projectTodo.empty")}</p>
       ) : (
-        <div className="todo-list">
-          {todos.map((todo, index) => (
-            <TodoCard
-              key={todo.id}
-              todo={todo}
-              index={index}
-              total={todos.length}
-              onEdit={() => setEditingTodo(todo)}
-              onStatusChange={(status) => onChangeTodoStatus(idea.id, todo.id, status)}
-              onDelete={() => onDeleteTodo(idea.id, todo.id)}
-              onMove={(direction) => onMoveTodo(idea.id, todo.id, direction)}
-            />
-          ))}
+        <div className="todo-status-board project-todo-board">
+          {todoStatusOrder.map((status) => {
+            const groupTodos = todos.filter((todo) => todo.status === status);
+            return (
+              <section
+                key={status}
+                className="todo-drop-group"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={() => {
+                  if (draggedTodoId) onDropTodo(idea.id, draggedTodoId, status);
+                  setDraggedTodoId(null);
+                }}
+              >
+                <div className="daily-group-heading">
+                  <strong>{todoStatusMeta[status].label}</strong>
+                  <span>{groupTodos.length}</span>
+                </div>
+                <div className="todo-list">
+                  {groupTodos.map((todo, index) => (
+                    <TodoCard
+                      key={todo.id}
+                      todo={todo}
+                      index={index}
+                      total={groupTodos.length}
+                      onEdit={() => setEditingTodo(todo)}
+                      onStatusChange={(nextStatus) => onChangeTodoStatus(idea.id, todo.id, nextStatus)}
+                      onDelete={() => onDeleteTodo(idea.id, todo.id)}
+                      onMove={(direction) => onMoveTodo(idea.id, todo.id, direction)}
+                      onDragStart={() => setDraggedTodoId(todo.id)}
+                      onDragEnd={() => setDraggedTodoId(null)}
+                      onDropOnCard={() => {
+                        if (draggedTodoId && draggedTodoId !== todo.id) onDropTodo(idea.id, draggedTodoId, status, todo.id);
+                        setDraggedTodoId(null);
+                      }}
+                    />
+                  ))}
+                  {groupTodos.length === 0 && <p className="muted-text daily-empty-group">{t("daily.emptyGroup")}</p>}
+                </div>
+              </section>
+            );
+          })}
         </div>
       )}
 
@@ -1388,8 +1789,8 @@ function ProjectTodoSection({
         <DailyTodoImportModal
           todos={dailyTodos}
           onClose={() => setDailyImportOpen(false)}
-          onApply={(selectedTodos) => {
-            onImportDailyTodos(idea.id, selectedTodos);
+          onApply={(selectedTodos, linked) => {
+            onImportDailyTodos(idea.id, selectedTodos, linked);
             setDailyImportOpen(false);
           }}
         />
@@ -1406,6 +1807,9 @@ function TodoCard({
   onStatusChange,
   onDelete,
   onMove,
+  onDragStart,
+  onDragEnd,
+  onDropOnCard,
 }: {
   todo: TodoItem;
   index: number;
@@ -1414,9 +1818,23 @@ function TodoCard({
   onStatusChange: (status: TodoStatus) => void;
   onDelete: () => void;
   onMove: (direction: -1 | 1) => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onDropOnCard: () => void;
 }) {
+  const t = useI18n();
   return (
-    <article className={`todo-card ${todoStatusMeta[todo.status].className}`}>
+    <article
+      className={`todo-card ${todoStatusMeta[todo.status].className}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        event.stopPropagation();
+        onDropOnCard();
+      }}
+    >
       <div className="todo-card-main">
         <div className="todo-title-row">
           <strong>{todo.title}</strong>
@@ -1443,7 +1861,12 @@ function TodoCard({
               {formatDate(todo.completedAt)}
             </span>
           )}
-          {todo.source?.type === "daily_todo" && <span>Daily Todo · {formatDateOnly(todo.source.date)}</span>}
+          {todo.link?.type === "daily_todo" && (
+            <span>
+              <Link2 size={14} />
+              {t("todo.linkedDaily")} · {formatDateOnly(todo.link.dailyTodoDate)}
+            </span>
+          )}
         </div>
       </div>
       <div className="todo-card-controls">
@@ -1589,12 +2012,13 @@ function DailyTodoImportModal({
 }: {
   todos: DailyTodo[];
   onClose: () => void;
-  onApply: (todos: DailyTodo[]) => void;
+  onApply: (todos: DailyTodo[], linked: boolean) => void;
 }) {
   const t = useI18n();
   const [date, setDate] = useState(todayDateKey());
   const [query, setQuery] = useState("");
   const [onlyOpen, setOnlyOpen] = useState(true);
+  const [linked, setLinked] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const visibleTodos = todos
     .filter((todo) => todo.date === date)
@@ -1646,6 +2070,17 @@ function DailyTodoImportModal({
           ))}
           {visibleTodos.length === 0 && <p className="muted-text">{t("daily.emptyGroup")}</p>}
         </div>
+        <div className="import-mode">
+          <span>{t("daily.importMode")}</span>
+          <label>
+            <input type="radio" checked={!linked} onChange={() => setLinked(false)} />
+            {t("daily.copyOnly")}
+          </label>
+          <label>
+            <input type="radio" checked={linked} onChange={() => setLinked(true)} />
+            {t("daily.linkWithDaily")}
+          </label>
+        </div>
         <div className="modal-actions">
           <button type="button" className="ghost-button" onClick={onClose}>
             {t("common.cancel")}
@@ -1653,7 +2088,7 @@ function DailyTodoImportModal({
           <button
             type="button"
             className="primary-button"
-            onClick={() => onApply(todos.filter((todo) => selectedIds.includes(todo.id)))}
+            onClick={() => onApply(todos.filter((todo) => selectedIds.includes(todo.id)), linked)}
             disabled={selectedIds.length === 0}
           >
             <Check size={18} />
@@ -1669,13 +2104,14 @@ function IdeasBoard({
   ideas,
   onSelect,
   onEdit,
-  onStatusChange,
+  onMoveIdea,
 }: {
   ideas: Idea[];
   onSelect: (idea: Idea) => void;
   onEdit: (idea: Idea) => void;
-  onStatusChange: (id: string, status: IdeaStatus) => void;
+  onMoveIdea: (id: string, status: IdeaStatus, overId?: string) => void;
 }) {
+  const t = useI18n();
   const [draggedId, setDraggedId] = useState<string | null>(null);
 
   return (
@@ -1689,7 +2125,7 @@ function IdeasBoard({
             className="board-column"
             onDragOver={(event) => event.preventDefault()}
             onDrop={() => {
-              if (draggedId) onStatusChange(draggedId, status);
+              if (draggedId) onMoveIdea(draggedId, status);
               setDraggedId(null);
             }}
           >
@@ -1705,6 +2141,13 @@ function IdeasBoard({
                   className="board-card"
                   draggable
                   onDragStart={() => setDraggedId(idea.id)}
+                  onDragEnd={() => setDraggedId(null)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.stopPropagation();
+                    if (draggedId && draggedId !== idea.id) onMoveIdea(draggedId, status, idea.id);
+                    setDraggedId(null);
+                  }}
                   onClick={() => onSelect(idea)}
                 >
                   {(() => {
@@ -1736,7 +2179,7 @@ function IdeasBoard({
                   })()}
                 </article>
               ))}
-              {columnIdeas.length === 0 && <div className="board-empty">拖拽 idea 到这里</div>}
+              {columnIdeas.length === 0 && <div className="board-empty">{t("board.dropHere")}</div>}
             </div>
           </div>
         );
@@ -1755,6 +2198,7 @@ function DailyTodoPage({
   onStatusChange,
   onDeleteTodo,
   onMoveTodo,
+  onDropTodo,
   onClearDone,
   onAddAiTodos,
   llmSettings,
@@ -1768,6 +2212,7 @@ function DailyTodoPage({
   onStatusChange: (id: string, status: DailyTodoStatus) => void;
   onDeleteTodo: (id: string) => void;
   onMoveTodo: (id: string, direction: -1 | 1) => void;
+  onDropTodo: (id: string, status: DailyTodoStatus, overId?: string) => void;
   onClearDone: (date: string) => void;
   onAddAiTodos: (drafts: TodoDraft[]) => void;
   llmSettings: LlmSettings;
@@ -1776,6 +2221,7 @@ function DailyTodoPage({
   const [query, setQuery] = useState("");
   const [tagFilter, setTagFilter] = useState("all");
   const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [draggedTodoId, setDraggedTodoId] = useState<string | null>(null);
   const dateTodos = todos.filter((todo) => todo.date === selectedDate);
   const visibleTodos = dateTodos.filter((todo) => matchesDailyTodo(todo, query, tagFilter)).sort((a, b) => a.order - b.order);
   const activeTodos = dateTodos.filter((todo) => todo.status !== "cancelled");
@@ -1852,7 +2298,15 @@ function DailyTodoPage({
           {todoStatusOrder.map((status) => {
             const groupTodos = visibleTodos.filter((todo) => todo.status === status);
             return (
-              <section key={status} className="daily-group">
+              <section
+                key={status}
+                className="daily-group"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={() => {
+                  if (draggedTodoId) onDropTodo(draggedTodoId, status);
+                  setDraggedTodoId(null);
+                }}
+              >
                 <div className="daily-group-heading">
                   <strong>{todoStatusMeta[status].label}</strong>
                   <span>{groupTodos.length}</span>
@@ -1871,6 +2325,12 @@ function DailyTodoPage({
                         onStatusChange={(nextStatus) => onStatusChange(todo.id, nextStatus)}
                         onDelete={() => onDeleteTodo(todo.id)}
                         onMove={(direction) => onMoveTodo(todo.id, direction)}
+                        onDragStart={() => setDraggedTodoId(todo.id)}
+                        onDragEnd={() => setDraggedTodoId(null)}
+                        onDropOnCard={() => {
+                          if (draggedTodoId && draggedTodoId !== todo.id) onDropTodo(draggedTodoId, status, todo.id);
+                          setDraggedTodoId(null);
+                        }}
                       />
                     );
                   })}
@@ -1904,6 +2364,9 @@ function DailyTodoCard({
   onStatusChange,
   onDelete,
   onMove,
+  onDragStart,
+  onDragEnd,
+  onDropOnCard,
 }: {
   todo: DailyTodo;
   index: number;
@@ -1912,9 +2375,23 @@ function DailyTodoCard({
   onStatusChange: (status: DailyTodoStatus) => void;
   onDelete: () => void;
   onMove: (direction: -1 | 1) => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
+  onDropOnCard: () => void;
 }) {
+  const t = useI18n();
   return (
-    <article className={`todo-card daily-todo-card ${todoStatusMeta[todo.status].className}`}>
+    <article
+      className={`todo-card daily-todo-card ${todoStatusMeta[todo.status].className}`}
+      draggable
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        event.stopPropagation();
+        onDropOnCard();
+      }}
+    >
       <div className="todo-card-main">
         <div className="todo-title-row">
           <strong>{todo.title}</strong>
@@ -1935,6 +2412,12 @@ function DailyTodoCard({
             <span>
               <Check size={14} />
               {formatDate(todo.completedAt)}
+            </span>
+          )}
+          {normalizeLinkedProjectTodos(todo.linkedProjectTodos).length > 0 && (
+            <span>
+              <Link2 size={14} />
+              {t("todo.linkedProject")}
             </span>
           )}
         </div>

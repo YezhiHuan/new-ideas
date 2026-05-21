@@ -1,12 +1,26 @@
 # NEW IDEAS
 
-NEW IDEAS is a Tauri 2 + React + TypeScript desktop local workspace for research ideas, project todo tracking, and daily task records. It is designed as a local-first tool: user data, LLM settings, and task records are stored on the user's device unless explicitly exported.
+NEW IDEAS is a local-first desktop app for research ideas and todo management. It helps manage Research Ideas, Project Todo, and Daily Todo in one local desktop workspace. User data is saved on the user's device by default.
 
-中文简述：NEW IDEAS 是一个本地优先的桌面工作区，支持科研 idea 管理、Project Todo、Daily Todo、AI 辅助整理和中英文界面切换。
+中文简述：NEW IDEAS 是一个本地优先的桌面端 Todo / Idea 管理软件，用于管理 Research Ideas、Project Todo 和 Daily Todo。所有用户数据默认保存在本机。
 
-## Workspaces
+## What It Does
 
-### Research Ideas
+NEW IDEAS is built for people who need to capture research directions, turn them into executable project tasks, and keep a daily task record without relying on a server.
+
+Core capabilities:
+
+- Research Ideas
+- Project Todo
+- Daily Todo
+- AI Idea generation
+- AI Todo generation
+- Related Document Repository
+- Local file, folder, and URL opening
+- English / Chinese UI
+- Local import / export backup
+
+## Research Ideas
 
 The Research Ideas workspace is used to capture and develop research ideas. Each research idea can contain:
 
@@ -21,7 +35,7 @@ Plan and Todo have different roles:
 
 `targetDate` is no longer part of the core UI. It remains only as a legacy optional field for older imported records.
 
-### Project Todo
+## Project Todo
 
 Each research idea has its own Project Todo list. Project Todo supports:
 
@@ -32,10 +46,12 @@ Each research idea has its own Project Todo list. Project Todo supports:
 - automatic `completedAt` when a todo is marked done
 - automatic idea `updatedAt` when todo data changes
 - automatic idea progress based on `done / active todos`; cancelled items are excluded
+- optional local binding with a Daily Todo item
+- drag cards between status groups or within the same group to update status and order
 
 Idea cards and the board show todo progress such as `3/8 completed`.
 
-### Daily Todo
+## Daily Todo
 
 Daily Todo is a separate general-purpose task workspace. It does not include research fields such as content, plan, repositories, hypotheses, or novelty.
 
@@ -47,26 +63,32 @@ Daily Todo supports:
 - priority, tags, description, search, and tag filtering
 - date-level stats: total tasks, done, in progress, not started, completion rate
 - clearing completed tasks for the selected date
+- optional local binding with Project Todo
+- drag cards between status groups or within the same group to update status and order
 
-### Daily Todo to Project Todo
+## Daily Todo and Project Todo Binding
 
-Daily Todo items can be copied into a research idea as Project Todo items. The source Daily Todo is not deleted.
+Daily Todo items can be added into a research idea as Project Todo items in two ways:
 
-Mapping:
+- Copy only: creates a one-time Project Todo copy. Later edits on either side are independent.
+- Link with Daily Todo: creates a local binding between the Daily Todo and the Project Todo.
 
-- `DailyTodo.title` -> `TodoItem.title`
-- `DailyTodo.description` -> `TodoItem.description`
-- `DailyTodo.status` -> `TodoItem.status`
-- `DailyTodo.priority` -> `TodoItem.priority`
-- `DailyTodo.tags` -> `TodoItem.tags`
-- `DailyTodo.completedAt` -> `TodoItem.completedAt` when status is done
-- `TodoItem.id` is regenerated
-- `TodoItem.createdAt`, `updatedAt`, and `order` are generated at import time
-- `TodoItem.source` stores the original Daily Todo id and date
+When linked, these fields are mirrored locally between the two todo items:
+
+- title
+- description
+- status
+- priority
+- tags
+- completedAt
+
+Order is local to each page. Dragging a linked Project Todo or Daily Todo updates that page's order only, while status changes still update the linked counterpart.
+
+Deleting a linked todo asks whether to unlink only, delete both, or cancel. If a linked target cannot be found, NEW IDEAS removes the invalid local binding and keeps the app running.
 
 ## AI Features
 
-All AI requests go through Tauri commands and the Rust provider adapter. The frontend does not hard-code API keys.
+AI assistance is optional. All AI requests use the configured provider through Tauri commands. The frontend does not hard-code API keys.
 
 Supported AI flows:
 
@@ -89,8 +111,8 @@ Settings include:
 - Base URL
 - API Key
 - Model
-- refresh model list
-- test connection
+- Refresh Models
+- Test Connection
 
 OpenAI-compatible providers use `GET {baseUrl}/models` for model refresh and `POST {baseUrl}/chat/completions` for chat calls. Anthropic uses the Messages API.
 
@@ -122,7 +144,7 @@ The Settings page includes a language switch:
 
 The setting is stored locally and loaded on app startup. The visible workspace UI, todo controls, settings, AI actions, and repository actions use the lightweight dictionary in `src/i18n/`.
 
-## Local Data and Migration
+## Local Data and Backup
 
 The current storage adapter uses IndexedDB:
 
@@ -130,6 +152,14 @@ The current storage adapter uses IndexedDB:
 - `dailyTodos`: Daily Todo records
 - `settings`: theme, language, and LLM settings
 - `meta`: migration state and schema version
+
+User data is saved on the local device. API keys are saved in local app configuration. NEW IDEAS does not include cloud services and does not require a server.
+
+Import and export are backup and migration tools only:
+
+- Export Data creates a local JSON backup.
+- Import Data restores or migrates local data from a JSON file.
+- Backup files stay wherever the user saves them.
 
 The current schema is `schemaVersion = 2`.
 
@@ -143,10 +173,10 @@ Migration behavior:
 
 ## Privacy Notes
 
-- API keys are stored in the local workspace settings.
-- User data is stored locally by the storage adapter.
+- User data is not uploaded automatically.
+- API keys are stored in local settings and should not be committed to GitHub.
 - Do not commit `.env`, API keys, local databases, private exports, or private task data.
-- Exported JSON files can contain user data and should be reviewed before publishing.
+- Exported JSON or database files are visible to others only if the user manually commits or shares them.
 
 ## Development
 
@@ -219,6 +249,9 @@ npm run tauri:build
 2. Generate Project Todo with AI and confirm that the preview must be applied before saving.
 3. Create Daily Todo records for today and a historical date.
 4. Generate Daily Todo with AI from natural language and confirm that preview items are editable.
-5. Copy Daily Todo items into a Research Idea as Project Todo.
-6. Switch UI language in Settings and reload the app.
-7. Open a GitHub URL, local folder, and local file from Related Document Repository in the Tauri desktop runtime.
+5. Add Daily Todo items into a Research Idea as Copy only.
+6. Add Daily Todo items into a Research Idea as Link with Daily Todo, then edit title/status/priority/tags from either side.
+7. Drag Research Idea cards between board columns and within a column.
+8. Drag Project Todo and Daily Todo cards between status groups and within a group.
+9. Switch UI language in Settings and reload the app.
+10. Open a GitHub URL, local folder, and local file from Related Document Repository in the Tauri desktop runtime.

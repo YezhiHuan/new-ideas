@@ -35,8 +35,8 @@ export interface StorageAdapter {
   loadSettings(): Promise<AppSettings>;
   saveSettings(settings: AppSettings): Promise<void>;
   saveTheme(theme: ThemeMode): Promise<void>;
-  exportIdeas(ideas: Idea[]): void;
-  importIdeasFromFile(file: File): Promise<Idea[]>;
+  exportData(ideas: Idea[], dailyTodos: DailyTodo[]): void;
+  importDataFromFile(file: File): Promise<Pick<AppData, "ideas" | "dailyTodos">>;
 }
 
 class IndexedDbStorageAdapter implements StorageAdapter {
@@ -90,12 +90,13 @@ class IndexedDbStorageAdapter implements StorageAdapter {
     await this.saveSettings({ ...settings, theme });
   }
 
-  exportIdeas(ideas: Idea[]) {
+  exportData(ideas: Idea[], dailyTodos: DailyTodo[]) {
     const payload = {
       app: "NEW IDEAS",
       version: SCHEMA_VERSION,
       exportedAt: new Date().toISOString(),
       ideas: ideas.map(normalizeIdea),
+      dailyTodos: dailyTodos.map(normalizeDailyTodo),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -108,11 +109,16 @@ class IndexedDbStorageAdapter implements StorageAdapter {
     URL.revokeObjectURL(url);
   }
 
-  async importIdeasFromFile(file: File): Promise<Idea[]> {
+  async importDataFromFile(file: File): Promise<Pick<AppData, "ideas" | "dailyTodos">> {
     const text = await file.text();
     const parsed = JSON.parse(text);
-    if (Array.isArray(parsed)) return (parsed as Idea[]).map(normalizeIdea);
-    if (Array.isArray(parsed.ideas)) return (parsed.ideas as Idea[]).map(normalizeIdea);
+    if (Array.isArray(parsed)) return { ideas: (parsed as Idea[]).map(normalizeIdea), dailyTodos: [] };
+    if (Array.isArray(parsed.ideas)) {
+      return {
+        ideas: (parsed.ideas as Idea[]).map(normalizeIdea),
+        dailyTodos: Array.isArray(parsed.dailyTodos) ? (parsed.dailyTodos as DailyTodo[]).map(normalizeDailyTodo) : [],
+      };
+    }
     throw new Error("导入文件不是有效的 NEW IDEAS 数据。");
   }
 
@@ -226,12 +232,13 @@ class IndexedDbStorageAdapter implements StorageAdapter {
   }
 }
 
-function normalizeIdea(idea: Idea): Idea {
+function normalizeIdea(idea: Idea, index = 0): Idea {
   return withCalculatedIdeaProgress({
     ...idea,
     repositories: Array.isArray(idea.repositories) ? idea.repositories : [],
     tags: normalizeTags(Array.isArray(idea.tags) ? idea.tags : []),
     progress: Number(idea.progress ?? 0),
+    order: Number.isFinite(idea.order) ? idea.order : index,
     todos: Array.isArray(idea.todos) ? idea.todos : [],
   });
 }
@@ -252,6 +259,9 @@ function normalizeDailyTodo(todo: DailyTodo): DailyTodo {
     completedAt: status === "done" ? todo.completedAt || now : undefined,
     tags: normalizeTags(Array.isArray(todo.tags) ? todo.tags : []),
     order: Number.isFinite(todo.order) ? todo.order : 0,
+    linkedProjectTodos: Array.isArray(todo.linkedProjectTodos)
+      ? todo.linkedProjectTodos.filter((link) => link?.ideaId && link?.todoId)
+      : [],
   };
 }
 
@@ -300,5 +310,5 @@ export const saveDailyTodos = (todos: DailyTodo[]) => storageAdapter.saveDailyTo
 export const loadSettings = () => storageAdapter.loadSettings();
 export const saveSettings = (settings: AppSettings) => storageAdapter.saveSettings(settings);
 export const saveTheme = (theme: ThemeMode) => storageAdapter.saveTheme(theme);
-export const exportIdeas = (ideas: Idea[]) => storageAdapter.exportIdeas(ideas);
-export const importIdeasFromFile = (file: File) => storageAdapter.importIdeasFromFile(file);
+export const exportData = (ideas: Idea[], dailyTodos: DailyTodo[]) => storageAdapter.exportData(ideas, dailyTodos);
+export const importDataFromFile = (file: File) => storageAdapter.importDataFromFile(file);

@@ -53,6 +53,10 @@ export function nextStatus(status: IdeaStatus): IdeaStatus {
 
 export function sortIdeas(ideas: Idea[], mode: SortMode) {
   return [...ideas].sort((a, b) => {
+    if (mode === "updated_desc" && Number.isFinite(a.order) && Number.isFinite(b.order) && a.status === b.status) {
+      const orderDelta = (a.order ?? 0) - (b.order ?? 0);
+      if (orderDelta !== 0) return orderDelta;
+    }
     if (mode === "priority_desc") {
       const priorityDelta = priorityMeta[b.priority].weight - priorityMeta[a.priority].weight;
       if (priorityDelta !== 0) return priorityDelta;
@@ -140,6 +144,15 @@ export function normalizeIdeaTodos(todos: TodoItem[] | undefined): TodoItem[] {
         dueDate: todo.dueDate || undefined,
         completedAt: status === "done" ? todo.completedAt || now : undefined,
         order: Number.isFinite(todo.order) ? todo.order : index,
+        link:
+          todo.link?.type === "daily_todo" && todo.link.dailyTodoId
+            ? {
+                type: "daily_todo" as const,
+                dailyTodoId: todo.link.dailyTodoId,
+                dailyTodoDate: todo.link.dailyTodoDate || todo.source?.date || now.slice(0, 10),
+              }
+            : undefined,
+        source: todo.source,
       };
     })
     .sort((a, b) => a.order - b.order)
@@ -187,7 +200,7 @@ export function matchesDailyTodo(todo: DailyTodo, query: string, tag: string) {
   return tagMatch && queryMatch;
 }
 
-export function projectTodoFromDailyTodo(todo: DailyTodo, order: number): TodoItem {
+export function projectTodoFromDailyTodo(todo: DailyTodo, order: number, linked = false): TodoItem {
   const now = new Date().toISOString();
   return {
     id: createId("todo"),
@@ -200,10 +213,12 @@ export function projectTodoFromDailyTodo(todo: DailyTodo, order: number): TodoIt
     updatedAt: now,
     completedAt: todo.status === "done" ? todo.completedAt || now : undefined,
     order,
-    source: {
-      type: "daily_todo",
-      id: todo.id,
-      date: todo.date,
-    },
+    link: linked
+      ? {
+          type: "daily_todo",
+          dailyTodoId: todo.id,
+          dailyTodoDate: todo.date,
+        }
+      : undefined,
   };
 }
