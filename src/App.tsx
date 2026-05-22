@@ -1,4 +1,21 @@
 import {
+  DndContext,
+  type DragEndEvent,
+  KeyboardSensor,
+  PointerSensor,
+  closestCorners,
+  useDroppable,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import {
   Archive,
   ArrowDown,
   ArrowDownAZ,
@@ -39,7 +56,7 @@ import {
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { open as openShell } from "@tauri-apps/plugin-shell";
 import { invoke } from "@tauri-apps/api/core";
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ChangeEvent, type CSSProperties, FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   emptyIdeaContent,
   emptyIdeaPlan,
@@ -56,7 +73,7 @@ import {
   generateIdeaWithAI,
   generateProjectTodosWithAI,
   ideaToDraft,
-  organizeIdeaWithAI,
+  modifyIdeaWithAI,
   testLlmConnection,
 } from "./ai";
 import { createTranslator, I18nProvider, useI18n } from "./i18n";
@@ -112,6 +129,19 @@ const todoStatusMeta: Record<TodoStatus, { label: string; shortLabel: string; cl
 };
 
 const todoStatusOrder: TodoStatus[] = ["todo", "in_progress", "done", "cancelled"];
+
+const ideaColumnId = (status: IdeaStatus) => `idea-column:${status}`;
+const todoColumnId = (scope: "project" | "daily", status: TodoStatus) => `${scope}-todo-column:${status}`;
+
+function ideaStatusFromColumnId(id: string): IdeaStatus | null {
+  const status = id.replace("idea-column:", "");
+  return statusOrder.includes(status as IdeaStatus) ? (status as IdeaStatus) : null;
+}
+
+function todoStatusFromColumnId(id: string, scope: "project" | "daily"): TodoStatus | null {
+  const status = id.replace(`${scope}-todo-column:`, "");
+  return todoStatusOrder.includes(status as TodoStatus) ? (status as TodoStatus) : null;
+}
 
 const blankRepository = (): RelatedRepository => ({
   id: createId("repo"),
@@ -276,6 +306,39 @@ function reorderTodosForDrop<T extends { id: string; status: TodoStatus; order: 
     });
   });
   return todos.map((todo) => byId.get(todo.id) ?? todo);
+}
+
+function useAppDragSensors() {
+  return useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+}
+
+function sortableStyle(transform: ReturnType<typeof CSS.Transform.toString>, transition: string | undefined, isDragging: boolean): CSSProperties {
+  return {
+    transform: transform ?? undefined,
+    transition,
+    opacity: isDragging ? 0.58 : 1,
+    zIndex: isDragging ? 3 : undefined,
+  };
+}
+
+function DroppableColumn({
+  id,
+  className,
+  children,
+}: {
+  id: string;
+  className: string;
+  children: ReactNode;
+}) {
+  const { isOver, setNodeRef } = useDroppable({ id });
+  return (
+    <div ref={setNodeRef} className={`${className}${isOver ? " drag-over" : ""}`}>
+      {children}
+    </div>
+  );
 }
 
 const createBlankIdea = (): Idea => {
@@ -1668,9 +1731,24 @@ function ProjectTodoSection({
   const [editingTodo, setEditingTodo] = useState<TodoItem | null>(null);
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [dailyImportOpen, setDailyImportOpen] = useState(false);
-  const [draggedTodoId, setDraggedTodoId] = useState<string | null>(null);
+  const sensors = useAppDragSensors();
   const todos = [...(idea.todos ?? [])].sort((a, b) => a.order - b.order);
   const summary = todoCompletionSummary(todos);
+
+  function handleTodoDragEnd(event: DragEndEvent) {
+    const activeId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : "";
+    if (!overId || activeId === overId) return;
+
+    const targetColumnStatus = todoStatusFromColumnId(overId, "project");
+    if (targetColumnStatus) {
+      onDropTodo(idea.id, activeId, targetColumnStatus);
+      return;
+    }
+
+    const overTodo = todos.find((todo) => todo.id === overId);
+    if (overTodo) onDropTodo(idea.id, activeId, overTodo.status, overTodo.id);
+  }
 
   return (
     <section className="detail-section todo-section">
@@ -1708,48 +1786,38 @@ function ProjectTodoSection({
       {todos.length === 0 ? (
         <p className="muted-text">{t("projectTodo.empty")}</p>
       ) : (
-        <div className="todo-status-board project-todo-board">
-          {todoStatusOrder.map((status) => {
-            const groupTodos = todos.filter((todo) => todo.status === status);
-            return (
-              <section
-                key={status}
-                className="todo-drop-group"
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => {
-                  if (draggedTodoId) onDropTodo(idea.id, draggedTodoId, status);
-                  setDraggedTodoId(null);
-                }}
-              >
-                <div className="daily-group-heading">
-                  <strong>{todoStatusMeta[status].label}</strong>
-                  <span>{groupTodos.length}</span>
-                </div>
-                <div className="todo-list">
-                  {groupTodos.map((todo, index) => (
-                    <TodoCard
-                      key={todo.id}
-                      todo={todo}
-                      index={index}
-                      total={groupTodos.length}
-                      onEdit={() => setEditingTodo(todo)}
-                      onStatusChange={(nextStatus) => onChangeTodoStatus(idea.id, todo.id, nextStatus)}
-                      onDelete={() => onDeleteTodo(idea.id, todo.id)}
-                      onMove={(direction) => onMoveTodo(idea.id, todo.id, direction)}
-                      onDragStart={() => setDraggedTodoId(todo.id)}
-                      onDragEnd={() => setDraggedTodoId(null)}
-                      onDropOnCard={() => {
-                        if (draggedTodoId && draggedTodoId !== todo.id) onDropTodo(idea.id, draggedTodoId, status, todo.id);
-                        setDraggedTodoId(null);
-                      }}
-                    />
-                  ))}
-                  {groupTodos.length === 0 && <p className="muted-text daily-empty-group">{t("daily.emptyGroup")}</p>}
-                </div>
-              </section>
-            );
-          })}
-        </div>
+        <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleTodoDragEnd}>
+          <div className="todo-status-board project-todo-board">
+            {todoStatusOrder.map((status) => {
+              const groupTodos = todos.filter((todo) => todo.status === status).sort((a, b) => a.order - b.order);
+              return (
+                <DroppableColumn key={status} id={todoColumnId("project", status)} className="todo-drop-group">
+                  <div className="daily-group-heading">
+                    <strong>{todoStatusMeta[status].label}</strong>
+                    <span>{groupTodos.length}</span>
+                  </div>
+                  <SortableContext items={groupTodos.map((todo) => todo.id)} strategy={verticalListSortingStrategy}>
+                    <div className="todo-list">
+                      {groupTodos.map((todo, index) => (
+                        <TodoCard
+                          key={todo.id}
+                          todo={todo}
+                          index={index}
+                          total={groupTodos.length}
+                          onEdit={() => setEditingTodo(todo)}
+                          onStatusChange={(nextStatus) => onChangeTodoStatus(idea.id, todo.id, nextStatus)}
+                          onDelete={() => onDeleteTodo(idea.id, todo.id)}
+                          onMove={(direction) => onMoveTodo(idea.id, todo.id, direction)}
+                        />
+                      ))}
+                      {groupTodos.length === 0 && <p className="muted-text daily-empty-group">{t("daily.emptyGroup")}</p>}
+                    </div>
+                  </SortableContext>
+                </DroppableColumn>
+              );
+            })}
+          </div>
+        </DndContext>
       )}
 
       {editingTodo && (
@@ -1807,9 +1875,6 @@ function TodoCard({
   onStatusChange,
   onDelete,
   onMove,
-  onDragStart,
-  onDragEnd,
-  onDropOnCard,
 }: {
   todo: TodoItem;
   index: number;
@@ -1818,22 +1883,16 @@ function TodoCard({
   onStatusChange: (status: TodoStatus) => void;
   onDelete: () => void;
   onMove: (direction: -1 | 1) => void;
-  onDragStart: () => void;
-  onDragEnd: () => void;
-  onDropOnCard: () => void;
 }) {
   const t = useI18n();
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: todo.id });
   return (
     <article
-      className={`todo-card ${todoStatusMeta[todo.status].className}`}
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => {
-        event.stopPropagation();
-        onDropOnCard();
-      }}
+      ref={setNodeRef}
+      className={`todo-card sortable-card ${todoStatusMeta[todo.status].className}${isDragging ? " dragging" : ""}`}
+      style={sortableStyle(CSS.Transform.toString(transform), transition, isDragging)}
+      {...attributes}
+      {...listeners}
     >
       <div className="todo-card-main">
         <div className="todo-title-row">
@@ -2112,79 +2171,90 @@ function IdeasBoard({
   onMoveIdea: (id: string, status: IdeaStatus, overId?: string) => void;
 }) {
   const t = useI18n();
-  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const sensors = useAppDragSensors();
+
+  function handleDragEnd(event: DragEndEvent) {
+    const activeId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : "";
+    if (!overId || activeId === overId) return;
+
+    const targetColumnStatus = ideaStatusFromColumnId(overId);
+    if (targetColumnStatus) {
+      onMoveIdea(activeId, targetColumnStatus);
+      return;
+    }
+
+    const overIdea = ideas.find((idea) => idea.id === overId);
+    if (overIdea) onMoveIdea(activeId, overIdea.status, overIdea.id);
+  }
 
   return (
-    <section className="board">
-      {statusOrder.map((status) => {
-        const columnIdeas = ideas.filter((idea) => idea.status === status);
-        const Icon = statusMeta[status].icon;
-        return (
-          <div
-            key={status}
-            className="board-column"
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={() => {
-              if (draggedId) onMoveIdea(draggedId, status);
-              setDraggedId(null);
-            }}
-          >
-            <div className="board-heading">
-              <Icon size={18} />
-              <strong>{statusMeta[status].shortLabel}</strong>
-              <span>{columnIdeas.length}</span>
-            </div>
-            <div className="board-stack">
-              {columnIdeas.map((idea) => (
-                <article
-                  key={idea.id}
-                  className="board-card"
-                  draggable
-                  onDragStart={() => setDraggedId(idea.id)}
-                  onDragEnd={() => setDraggedId(null)}
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => {
-                    event.stopPropagation();
-                    if (draggedId && draggedId !== idea.id) onMoveIdea(draggedId, status, idea.id);
-                    setDraggedId(null);
-                  }}
-                  onClick={() => onSelect(idea)}
-                >
-                  {(() => {
-                    const summary = todoCompletionSummary(idea.todos);
-                    return (
-                      <>
-                  <div className="card-topline">
-                    <PriorityChip priority={idea.priority} />
-                    <button className="text-icon-button" onClick={(event) => {
-                      event.stopPropagation();
-                      onEdit(idea);
-                    }}>
-                      <Pencil size={15} />
-                    </button>
-                  </div>
-                  <h3>{idea.title}</h3>
-                  <p>{summarizeMarkdown(idea.content, 92)}</p>
-                  <div className="tag-row">
-                    {idea.tags.slice(0, 3).map((tag) => (
-                      <span key={tag}>{tag}</span>
-                    ))}
-                  </div>
-                  <div className="board-todo-summary">
-                    <ListTodo size={14} />
-                    <span>{summary.total ? `${summary.done}/${summary.total} completed` : "No todos"}</span>
-                  </div>
-                      </>
-                    );
-                  })()}
-                </article>
-              ))}
-              {columnIdeas.length === 0 && <div className="board-empty">{t("board.dropHere")}</div>}
-            </div>
-          </div>
-        );
-      })}
-    </section>
+    <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleDragEnd}>
+      <section className="board">
+        {statusOrder.map((status) => {
+          const columnIdeas = ideas.filter((idea) => idea.status === status).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+          const Icon = statusMeta[status].icon;
+          return (
+            <DroppableColumn key={status} id={ideaColumnId(status)} className="board-column">
+              <div className="board-heading">
+                <Icon size={18} />
+                <strong>{statusMeta[status].shortLabel}</strong>
+                <span>{columnIdeas.length}</span>
+              </div>
+              <SortableContext items={columnIdeas.map((idea) => idea.id)} strategy={verticalListSortingStrategy}>
+                <div className="board-stack">
+                  {columnIdeas.map((idea) => (
+                    <SortableIdeaCard key={idea.id} idea={idea} onSelect={onSelect} onEdit={onEdit} />
+                  ))}
+                  {columnIdeas.length === 0 && <div className="board-empty">{t("board.dropHere")}</div>}
+                </div>
+              </SortableContext>
+            </DroppableColumn>
+          );
+        })}
+      </section>
+    </DndContext>
+  );
+}
+
+function SortableIdeaCard({ idea, onSelect, onEdit }: { idea: Idea; onSelect: (idea: Idea) => void; onEdit: (idea: Idea) => void }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: idea.id });
+  const summary = todoCompletionSummary(idea.todos);
+
+  return (
+    <article
+      ref={setNodeRef}
+      className={`board-card sortable-card${isDragging ? " dragging" : ""}`}
+      style={sortableStyle(CSS.Transform.toString(transform), transition, isDragging)}
+      onClick={() => onSelect(idea)}
+      {...attributes}
+      {...listeners}
+    >
+      <div className="card-topline">
+        <PriorityChip priority={idea.priority} />
+        <button
+          type="button"
+          className="text-icon-button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onEdit(idea);
+          }}
+        >
+          <Pencil size={15} />
+        </button>
+      </div>
+      <h3>{idea.title}</h3>
+      <p>{summarizeMarkdown(idea.content, 92)}</p>
+      <div className="tag-row">
+        {idea.tags.slice(0, 3).map((tag) => (
+          <span key={tag}>{tag}</span>
+        ))}
+      </div>
+      <div className="board-todo-summary">
+        <ListTodo size={14} />
+        <span>{summary.total ? `${summary.done}/${summary.total} completed` : "No todos"}</span>
+      </div>
+    </article>
   );
 }
 
@@ -2221,7 +2291,7 @@ function DailyTodoPage({
   const [query, setQuery] = useState("");
   const [tagFilter, setTagFilter] = useState("all");
   const [aiModalOpen, setAiModalOpen] = useState(false);
-  const [draggedTodoId, setDraggedTodoId] = useState<string | null>(null);
+  const sensors = useAppDragSensors();
   const dateTodos = todos.filter((todo) => todo.date === selectedDate);
   const visibleTodos = dateTodos.filter((todo) => matchesDailyTodo(todo, query, tagFilter)).sort((a, b) => a.order - b.order);
   const activeTodos = dateTodos.filter((todo) => todo.status !== "cancelled");
@@ -2229,6 +2299,21 @@ function DailyTodoPage({
   const inProgressCount = dateTodos.filter((todo) => todo.status === "in_progress").length;
   const todoCount = dateTodos.filter((todo) => todo.status === "todo").length;
   const completionRate = activeTodos.length ? Math.round((doneCount / activeTodos.length) * 100) : 0;
+
+  function handleTodoDragEnd(event: DragEndEvent) {
+    const activeId = String(event.active.id);
+    const overId = event.over ? String(event.over.id) : "";
+    if (!overId || activeId === overId) return;
+
+    const targetColumnStatus = todoStatusFromColumnId(overId, "daily");
+    if (targetColumnStatus) {
+      onDropTodo(activeId, targetColumnStatus);
+      return;
+    }
+
+    const overTodo = visibleTodos.find((todo) => todo.id === overId);
+    if (overTodo) onDropTodo(activeId, overTodo.status, overTodo.id);
+  }
 
   return (
     <section className="daily-page">
@@ -2294,52 +2379,42 @@ function DailyTodoPage({
           </div>
         </aside>
 
-        <div className="daily-groups">
-          {todoStatusOrder.map((status) => {
-            const groupTodos = visibleTodos.filter((todo) => todo.status === status);
-            return (
-              <section
-                key={status}
-                className="daily-group"
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => {
-                  if (draggedTodoId) onDropTodo(draggedTodoId, status);
-                  setDraggedTodoId(null);
-                }}
-              >
-                <div className="daily-group-heading">
-                  <strong>{todoStatusMeta[status].label}</strong>
-                  <span>{groupTodos.length}</span>
-                </div>
-                <div className="todo-list">
-                  {groupTodos.map((todo) => {
-                    const sameDateTodos = visibleTodos.filter((item) => item.date === todo.date).sort((a, b) => a.order - b.order);
-                    const index = sameDateTodos.findIndex((item) => item.id === todo.id);
-                    return (
-                      <DailyTodoCard
-                        key={todo.id}
-                        todo={todo}
-                        index={index}
-                        total={sameDateTodos.length}
-                        onEdit={() => onEditTodo(todo)}
-                        onStatusChange={(nextStatus) => onStatusChange(todo.id, nextStatus)}
-                        onDelete={() => onDeleteTodo(todo.id)}
-                        onMove={(direction) => onMoveTodo(todo.id, direction)}
-                        onDragStart={() => setDraggedTodoId(todo.id)}
-                        onDragEnd={() => setDraggedTodoId(null)}
-                        onDropOnCard={() => {
-                          if (draggedTodoId && draggedTodoId !== todo.id) onDropTodo(draggedTodoId, status, todo.id);
-                          setDraggedTodoId(null);
-                        }}
-                      />
-                    );
-                  })}
-                  {groupTodos.length === 0 && <p className="muted-text daily-empty-group">{t("daily.emptyGroup")}</p>}
-                </div>
-              </section>
-            );
-          })}
-        </div>
+        <DndContext sensors={sensors} collisionDetection={closestCorners} onDragEnd={handleTodoDragEnd}>
+          <div className="daily-groups">
+            {todoStatusOrder.map((status) => {
+              const groupTodos = visibleTodos.filter((todo) => todo.status === status).sort((a, b) => a.order - b.order);
+              return (
+                <DroppableColumn key={status} id={todoColumnId("daily", status)} className="daily-group">
+                  <div className="daily-group-heading">
+                    <strong>{todoStatusMeta[status].label}</strong>
+                    <span>{groupTodos.length}</span>
+                  </div>
+                  <SortableContext items={groupTodos.map((todo) => todo.id)} strategy={verticalListSortingStrategy}>
+                    <div className="todo-list">
+                      {groupTodos.map((todo) => {
+                        const sameDateTodos = visibleTodos.filter((item) => item.date === todo.date).sort((a, b) => a.order - b.order);
+                        const index = sameDateTodos.findIndex((item) => item.id === todo.id);
+                        return (
+                          <DailyTodoCard
+                            key={todo.id}
+                            todo={todo}
+                            index={index}
+                            total={sameDateTodos.length}
+                            onEdit={() => onEditTodo(todo)}
+                            onStatusChange={(nextStatus) => onStatusChange(todo.id, nextStatus)}
+                            onDelete={() => onDeleteTodo(todo.id)}
+                            onMove={(direction) => onMoveTodo(todo.id, direction)}
+                          />
+                        );
+                      })}
+                      {groupTodos.length === 0 && <p className="muted-text daily-empty-group">{t("daily.emptyGroup")}</p>}
+                    </div>
+                  </SortableContext>
+                </DroppableColumn>
+              );
+            })}
+          </div>
+        </DndContext>
       </div>
       {aiModalOpen && (
         <DailyTodoAiModal
@@ -2364,9 +2439,6 @@ function DailyTodoCard({
   onStatusChange,
   onDelete,
   onMove,
-  onDragStart,
-  onDragEnd,
-  onDropOnCard,
 }: {
   todo: DailyTodo;
   index: number;
@@ -2375,22 +2447,16 @@ function DailyTodoCard({
   onStatusChange: (status: DailyTodoStatus) => void;
   onDelete: () => void;
   onMove: (direction: -1 | 1) => void;
-  onDragStart: () => void;
-  onDragEnd: () => void;
-  onDropOnCard: () => void;
 }) {
   const t = useI18n();
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: todo.id });
   return (
     <article
-      className={`todo-card daily-todo-card ${todoStatusMeta[todo.status].className}`}
-      draggable
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
-      onDragOver={(event) => event.preventDefault()}
-      onDrop={(event) => {
-        event.stopPropagation();
-        onDropOnCard();
-      }}
+      ref={setNodeRef}
+      className={`todo-card daily-todo-card sortable-card ${todoStatusMeta[todo.status].className}${isDragging ? " dragging" : ""}`}
+      style={sortableStyle(CSS.Transform.toString(transform), transition, isDragging)}
+      {...attributes}
+      {...listeners}
     >
       <div className="todo-card-main">
         <div className="todo-title-row">
@@ -2788,7 +2854,7 @@ function SettingsPage({
           {llm.provider === "openai-compatible" && (
             <p className="settings-note">DeepSeek、本地模型服务和第三方 OpenAI-compatible API 都可使用该模式。</p>
           )}
-          {!llm.apiKey.trim() && <p className="settings-warning">未配置 API Key 时，AI 新建和 AI 整理会显示配置提示。</p>}
+          {!llm.apiKey.trim() && <p className="settings-warning">未配置 API Key 时，AI 新建和 AI 修改会显示配置提示。</p>}
           <div className="settings-actions llm-actions">
             <button className="ghost-button" onClick={refreshModels} disabled={modelsLoading}>
               <RefreshCw size={18} />
@@ -2918,10 +2984,10 @@ function IdeaEditorModal({
   onClose: () => void;
   onSave: (idea: Idea) => void;
 }) {
+  const t = useI18n();
   const [draft, setDraft] = useState<Idea>(idea);
   const [tagsInput, setTagsInput] = useState(idea.tags.join(", "));
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError] = useState("");
+  const [modifyModalOpen, setModifyModalOpen] = useState(false);
 
   function patch<K extends keyof Idea>(key: K, value: Idea[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
@@ -2973,20 +3039,6 @@ function IdeaEditorModal({
     onSave({ ...draft, tags: normalizeTags(tagsInput) });
   }
 
-  async function organizeWithAI() {
-    setAiLoading(true);
-    setAiError("");
-    try {
-      const result = await organizeIdeaWithAI(ideaToDraft({ ...draft, tags: normalizeTags(tagsInput) }), llmSettings);
-      setDraft(draftToIdea(result, draft));
-      setTagsInput(result.tags.join(", "));
-    } catch (currentError) {
-      setAiError(currentError instanceof Error ? currentError.message : String(currentError));
-    } finally {
-      setAiLoading(false);
-    }
-  }
-
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true">
       <form className="idea-modal" onSubmit={submit}>
@@ -2996,17 +3048,15 @@ function IdeaEditorModal({
             <h2>{idea.title ? "编辑科研 idea" : "新建科研 idea"}</h2>
           </div>
           <div className="modal-heading-actions">
-            <button type="button" className="ghost-button ai-button" onClick={organizeWithAI} disabled={aiLoading}>
+            <button type="button" className="ghost-button ai-button" onClick={() => setModifyModalOpen(true)}>
               <Sparkles size={18} />
-              {aiLoading ? "整理中..." : "AI 整理"}
+              {t("idea.ai_modify")}
             </button>
             <button type="button" className="ghost-button icon-button" onClick={onClose}>
               <X size={18} />
             </button>
           </div>
         </div>
-
-        {aiError && <div className="error-banner">{aiError}</div>}
 
         <div className="form-grid">
           <label className="field wide">
@@ -3112,6 +3162,196 @@ function IdeaEditorModal({
           </button>
         </div>
       </form>
+      {modifyModalOpen && (
+        <IdeaModifyAiModal
+          idea={ideaToDraft({ ...draft, tags: normalizeTags(tagsInput) })}
+          llmSettings={llmSettings}
+          onClose={() => setModifyModalOpen(false)}
+          onApply={(modifiedDraft) => {
+            setDraft(draftToIdea(modifiedDraft, draft));
+            setTagsInput(modifiedDraft.tags.join(", "));
+            setModifyModalOpen(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function IdeaModifyAiModal({
+  idea,
+  llmSettings,
+  onClose,
+  onApply,
+}: {
+  idea: IdeaDraft;
+  llmSettings: LlmSettings;
+  onClose: () => void;
+  onApply: (draft: IdeaDraft) => void;
+}) {
+  const t = useI18n();
+  const [instruction, setInstruction] = useState("");
+  const [modifiedDraft, setModifiedDraft] = useState<IdeaDraft | null>(null);
+  const [tagsInput, setTagsInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  function patch<K extends keyof IdeaDraft>(key: K, value: IdeaDraft[K]) {
+    setModifiedDraft((current) => (current ? { ...current, [key]: value } : current));
+  }
+
+  function patchTodo(index: number, patchValue: Partial<TodoDraft>) {
+    setModifiedDraft((current) =>
+      current ? { ...current, todos: current.todos.map((todo, todoIndex) => (todoIndex === index ? { ...todo, ...patchValue } : todo)) } : current,
+    );
+  }
+
+  function removeTodo(index: number) {
+    setModifiedDraft((current) => (current ? { ...current, todos: current.todos.filter((_todo, todoIndex) => todoIndex !== index) } : current));
+  }
+
+  async function generate() {
+    if (!instruction.trim()) {
+      setError(t("idea.aiModifyInputError"));
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      const result = await modifyIdeaWithAI(idea, instruction, llmSettings);
+      setModifiedDraft(result);
+      setTagsInput(result.tags.join(", "));
+    } catch (currentError) {
+      setError(currentError instanceof Error ? currentError.message : String(currentError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function applyModifiedDraft() {
+    if (!modifiedDraft) return;
+    onApply({ ...modifiedDraft, tags: normalizeTags(tagsInput) });
+  }
+
+  return (
+    <div className="modal-backdrop nested-modal" role="dialog" aria-modal="true">
+      <section className="idea-modal ai-modal">
+        <div className="modal-heading">
+          <div>
+            <p className="eyebrow">AI idea modifier</p>
+            <h2>{t("idea.aiModifyTitle")}</h2>
+          </div>
+          <button type="button" className="ghost-button icon-button" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <p className="modal-note">{t("idea.aiModifyBody")}</p>
+
+        <label className="field wide ai-input">
+          <span>{t("idea.aiModifyRequest")}</span>
+          <textarea
+            value={instruction}
+            onChange={(event) => setInstruction(event.target.value)}
+            rows={5}
+            placeholder={t("idea.aiModifyPlaceholder")}
+            autoFocus
+          />
+        </label>
+
+        {error && <div className="error-banner">{error}</div>}
+
+        <div className="modal-actions split">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            {t("common.cancel")}
+          </button>
+          <button type="button" className="primary-button" onClick={generate} disabled={loading}>
+            <Sparkles size={18} />
+            {loading ? t("idea.aiModifyLoading") : modifiedDraft ? t("idea.aiModifyRegenerate") : t("idea.aiModifyGenerate")}
+          </button>
+        </div>
+
+        {modifiedDraft && (
+          <section className="ai-preview">
+            <div className="section-title compact">
+              <div>
+                <h3>{t("common.preview")}</h3>
+                <span className="section-caption">{t("idea.aiModifyPreviewNote")}</span>
+              </div>
+              <button type="button" className="primary-button" onClick={applyModifiedDraft}>
+                <Check size={16} />
+                {t("idea.aiModifyApply")}
+              </button>
+            </div>
+
+            <div className="form-grid ai-draft-edit-grid">
+              <label className="field wide">
+                <span>{t("common.title")}</span>
+                <input value={modifiedDraft.title} onChange={(event) => patch("title", event.target.value)} />
+              </label>
+              <label className="field">
+                <span>{t("common.status")}</span>
+                <select value={modifiedDraft.status} onChange={(event) => patch("status", event.target.value as IdeaStatus)}>
+                  {statusOrder.map((status) => (
+                    <option key={status} value={status}>
+                      {statusMeta[status].shortLabel}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>{t("common.priority")}</span>
+                <select value={modifiedDraft.priority} onChange={(event) => patch("priority", event.target.value as Priority)}>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+              </label>
+              <label className="field wide">
+                <span>Tags</span>
+                <input value={tagsInput} onChange={(event) => setTagsInput(event.target.value)} />
+              </label>
+              <label className="field wide">
+                <span>{t("idea.content")}</span>
+                <textarea value={modifiedDraft.content} onChange={(event) => patch("content", event.target.value)} rows={7} />
+              </label>
+              <label className="field wide">
+                <span>{t("idea.plan")}</span>
+                <textarea value={modifiedDraft.plan} onChange={(event) => patch("plan", event.target.value)} rows={6} />
+              </label>
+              <label className="field wide">
+                <span>{t("idea.notes")}</span>
+                <textarea value={modifiedDraft.notes ?? ""} onChange={(event) => patch("notes", event.target.value)} rows={3} />
+              </label>
+            </div>
+
+            <div className="todo-preview-list idea-modify-todos">
+              {modifiedDraft.todos.map((todo, index) => (
+                <div key={`${todo.title}-${index}`} className="todo-preview-row">
+                  <input value={todo.title} onChange={(event) => patchTodo(index, { title: event.target.value })} placeholder={t("common.title")} />
+                  <select value={todo.priority ?? "medium"} onChange={(event) => patchTodo(index, { priority: event.target.value as Priority })}>
+                    <option value="low">Low</option>
+                    <option value="medium">Medium</option>
+                    <option value="high">High</option>
+                  </select>
+                  <select value={todo.status ?? "todo"} onChange={(event) => patchTodo(index, { status: event.target.value as TodoStatus })}>
+                    {todoStatusOrder.map((status) => (
+                      <option key={status} value={status}>
+                        {todoStatusMeta[status].label}
+                      </option>
+                    ))}
+                  </select>
+                  <input value={todo.tags?.join(", ") ?? ""} onChange={(event) => patchTodo(index, { tags: normalizeTags(event.target.value) })} placeholder="tags" />
+                  <textarea value={todo.description ?? ""} onChange={(event) => patchTodo(index, { description: event.target.value })} placeholder={t("common.description")} rows={2} />
+                  <button type="button" className="danger-button icon-button" onClick={() => removeTodo(index)}>
+                    <Trash2 size={16} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+      </section>
     </div>
   );
 }

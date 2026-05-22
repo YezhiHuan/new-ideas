@@ -17,6 +17,7 @@ Core capabilities:
 - AI Todo generation
 - Related Document Repository
 - Local file, folder, and URL opening
+- board drag and drop for status and order updates
 - English / Chinese UI
 - Local import / export backup
 
@@ -34,6 +35,8 @@ Plan and Todo have different roles:
 - Todo is executable work and progress tracking.
 
 `targetDate` is no longer part of the core UI. It remains only as a legacy optional field for older imported records.
+
+The Ideas Board supports dragging idea cards between status columns or within the same column. Dropping a card updates the idea status and local order.
 
 ## Project Todo
 
@@ -93,11 +96,11 @@ AI assistance is optional. All AI requests use the configured provider through T
 Supported AI flows:
 
 - AI New Idea: natural language to structured research idea draft
-- AI Organize Idea: improve an existing idea draft before saving
+- AI Modify Idea: enter a modification request and let the configured AI provider revise the current idea draft
 - AI Generate Project Todo: generate executable todos from an idea's title, content, plan, and notes
 - AI Organize Daily Todo: convert natural language daily planning text into Daily Todo drafts
 
-AI-generated Project Todo and Daily Todo items are shown in a preview/editor first. They are not saved until the user confirms.
+AI-generated ideas, modified ideas, Project Todo items, and Daily Todo items are shown in a preview/editor first. AI Modify Idea does not automatically save changes; the user must confirm the preview before it replaces the current idea draft.
 
 The LLM provider adapter supports:
 
@@ -246,7 +249,7 @@ npm run tauri:build
 ## Verification Checklist
 
 1. Create a Research Idea and add Project Todo manually.
-2. Generate Project Todo with AI and confirm that the preview must be applied before saving.
+2. Use AI Modify Idea and confirm that the preview can be edited and must be applied before replacing the current idea draft.
 3. Create Daily Todo records for today and a historical date.
 4. Generate Daily Todo with AI from natural language and confirm that preview items are editable.
 5. Add Daily Todo items into a Research Idea as Copy only.

@@ -14,6 +14,11 @@ export async function organizeIdeaWithAI(input: IdeaDraft, settings: LlmSettings
   return sanitizeIdeaDraft(await invoke<IdeaDraft>("organize_idea_with_ai", { input, config }));
 }
 
+export async function modifyIdeaWithAI(input: IdeaDraft, instruction: string, settings: LlmSettings) {
+  const config = normalizeLlmSettings(settings);
+  return sanitizeIdeaDraft(await invoke<IdeaDraft>("modify_idea_with_ai", { input: { idea: input, instruction }, config }));
+}
+
 export async function fetchLlmModels(settings: LlmSettings) {
   const config = normalizeLlmSettings(settings, { allowMissingModel: true });
   return invoke<string[]>("fetch_llm_models", { config });

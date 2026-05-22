@@ -110,6 +110,13 @@ struct ProjectTodoAiInput {
     notes: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IdeaModifyInput {
+    idea: IdeaDraft,
+    instruction: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TodoAiResponse {
@@ -176,6 +183,21 @@ async fn organize_idea_with_ai(input: IdeaDraft, config: LlmConfig) -> Result<Id
     let user_prompt = format!(
         "请整理并增强下面这个科研 idea，保持用户已有意图，不要凭空加入已经完成的进展。返回结构化 IdeaDraft JSON。\n\n{}",
         serde_json::to_string_pretty(&input).map_err(|_| "无法序列化当前 idea。")?
+    );
+    request_idea_draft(user_prompt, config).await
+}
+
+#[tauri::command]
+async fn modify_idea_with_ai(input: IdeaModifyInput, config: LlmConfig) -> Result<IdeaDraft, String> {
+    if input.instruction.trim().is_empty() {
+        return Err("请输入希望 AI 如何修改这个 Idea。".to_string());
+    }
+    validate_base_settings(&config, true)?;
+
+    let user_prompt = format!(
+        "请根据用户的修改需求，基于当前 idea 重新修改并返回完整 IdeaDraft JSON。不要自动确认保存，不要解释。\n\n当前 idea：\n{}\n\n用户修改需求：\n{}",
+        serde_json::to_string_pretty(&input.idea).map_err(|_| "无法序列化当前 idea。")?,
+        input.instruction.trim()
     );
     request_idea_draft(user_prompt, config).await
 }
@@ -512,7 +534,7 @@ fn normalize_idea_draft(raw: Value) -> Result<IdeaDraft, String> {
         .collect();
     draft.progress = Some(draft.progress.unwrap_or(0).min(100));
 
-    if draft.title.is_empty() || draft.content.is_empty() || draft.plan.is_empty() || draft.tags.is_empty() {
+    if draft.title.is_empty() || draft.content.is_empty() || draft.plan.is_empty() {
         return Err("AI 返回的 JSON 字段不完整，请重新生成。".to_string());
     }
 
@@ -894,17 +916,16 @@ fn idea_system_prompt() -> &'static str {
     {
       "title": "string",
       "description": "string",
-      "status": "todo",
-      "priority": "medium",
+      "status": "todo | in_progress | done | cancelled",
+      "priority": "low | medium | high",
       "dueDate": null,
       "tags": []
     }
   ],
   "repositories": [],
-  "status": "not_started",
-  "tags": ["string"],
-  "priority": "medium",
-  "targetDate": null,
+  "status": "not_started | in_progress | completed | abandoned",
+  "tags": [],
+  "priority": "low | medium | high",
   "progress": 0,
   "notes": "string"
 }
@@ -918,9 +939,8 @@ fn idea_system_prompt() -> &'static str {
 7. todos 必须是 array，给 3-8 个可执行任务；todo.status 只能是 todo, in_progress, done, cancelled；todo.priority 只能是 low, medium, high；dueDate 可以是 string 或 null。
 8. todos 是执行任务，不要写成泛泛的研究方向；plan 是研究路线说明，可以更宏观。
 9. progress 必须是 number，默认 0。
-10. targetDate 是 legacy 字段，默认 null，不要把它当核心输出。
-11. status 默认 not_started，除非用户明确表示已经开始。
-12. priority 默认 medium。
+10. status 默认 not_started，除非用户明确表示已经开始。
+11. priority 默认 medium。
 content 要包含研究背景、核心问题、可能创新点、技术路线；plan 要给研究路线；todos 给可直接执行和勾选的任务；notes 写风险、假设或待确认问题。"##
 }
 
@@ -979,6 +999,7 @@ pub fn run() {
             test_llm_connection,
             generate_idea_with_ai,
             organize_idea_with_ai,
+            modify_idea_with_ai,
             generate_project_todos_with_ai,
             generate_daily_todos_with_ai,
             path_exists,

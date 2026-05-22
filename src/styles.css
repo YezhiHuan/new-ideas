@@ -782,14 +782,20 @@ button:disabled {
   background: color-mix(in srgb, var(--panel-strong) 84%, transparent);
 }
 
-.board-card[draggable="true"],
-.todo-card[draggable="true"] {
+.sortable-card {
   cursor: grab;
+  touch-action: none;
 }
 
-.board-card[draggable="true"]:active,
-.todo-card[draggable="true"]:active {
+.sortable-card:active,
+.sortable-card.dragging {
   cursor: grabbing;
+}
+
+.drag-over {
+  outline: 2px solid color-mix(in srgb, #0e7a54 62%, transparent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--soft) 76%, transparent);
 }
 
 .board-todo-summary {
@@ -924,6 +930,17 @@ button:disabled {
   z-index: 20;
 }
 
+.nested-modal {
+  z-index: 30;
+}
+
+.modal-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .idea-modal {
   width: min(1120px, calc(100vw - 56px));
   max-height: calc(100vh - 56px);
@@ -1037,6 +1054,14 @@ button:disabled {
   margin-top: 18px;
   padding-top: 18px;
   border-top: 1px solid var(--line);
+}
+
+.ai-draft-edit-grid {
+  margin-top: 0;
+}
+
+.idea-modify-todos {
+  margin-top: 12px;
 }
 
 .draft-preview-grid {
