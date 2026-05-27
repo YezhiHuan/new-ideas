@@ -1657,12 +1657,12 @@ mod tests {
     #[test]
     fn normalizes_plan_and_notes_arrays() {
         let raw = json!({
-            "title": "传感器噪声对转轮除湿模型辨识的影响",
-            "content": "研究传感器噪声对模型辨识稳定性的影响。",
-            "plan": ["文献调研", "建立噪声模型", "使用 UKF 进行估计", "实验验证"],
+            "title": "公开数据集方法对比",
+            "content": "研究不同方法在公开数据集上的表现差异。",
+            "plan": ["文献调研", "整理数据集", "建立评价指标", "实验验证"],
             "repositories": [],
             "status": "not_started",
-            "tags": ["转轮除湿", "UKF", "数据同化"],
+            "tags": ["公开数据集", "方法对比", "实验验证"],
             "priority": "medium",
             "progress": 0,
             "notes": ["需要确认传感器采样频率", "需要真实运行数据"]
@@ -1671,25 +1671,25 @@ mod tests {
         let draft = normalize_idea_draft(raw).expect("sample 1 should normalize");
         assert_eq!(
             draft.plan,
-            "文献调研\n建立噪声模型\n使用 UKF 进行估计\n实验验证"
+            "文献调研\n整理数据集\n建立评价指标\n实验验证"
         );
         assert_eq!(
             draft.notes.as_deref(),
             Some("需要确认传感器采样频率\n需要真实运行数据")
         );
-        assert_eq!(draft.tags, vec!["转轮除湿", "UKF", "数据同化"]);
+        assert_eq!(draft.tags, vec!["公开数据集", "方法对比", "实验验证"]);
         assert_eq!(draft.progress, Some(0));
     }
 
     #[test]
     fn normalizes_tags_string_content_array_and_progress_string() {
         let raw = json!({
-            "title": "转轮除湿数据同化",
+            "title": "公开数据集评估",
             "content": ["研究背景", "核心问题", "创新点"],
             "plan": "1. 调研\n2. 建模\n3. 验证",
             "repositories": [],
             "status": "in_progress",
-            "tags": "转轮除湿, UKF, 粒子滤波",
+            "tags": "公开数据集, 基线模型, 误差分析",
             "priority": "high",
             "progress": "0",
             "notes": ""
@@ -1697,7 +1697,7 @@ mod tests {
 
         let draft = normalize_idea_draft(raw).expect("sample 2 should normalize");
         assert_eq!(draft.content, "研究背景\n核心问题\n创新点");
-        assert_eq!(draft.tags, vec!["转轮除湿", "UKF", "粒子滤波"]);
+        assert_eq!(draft.tags, vec!["公开数据集", "基线模型", "误差分析"]);
         assert!(matches!(draft.status, IdeaStatus::InProgress));
         assert!(matches!(draft.priority, Priority::High));
         assert_eq!(draft.progress, Some(0));
@@ -1706,13 +1706,13 @@ mod tests {
     #[test]
     fn normalizes_ai_generated_todos() {
         let raw = json!({
-            "title": "转轮除湿实验计划",
-            "content": "研究实验工况对模型辨识的影响。",
-            "plan": "1. 设计工况\n2. 采集数据\n3. 验证模型",
+            "title": "公开数据集实验计划",
+            "content": "研究不同基线方法对评估结果的影响。",
+            "plan": "1. 设计实验\n2. 整理数据\n3. 验证模型",
             "todos": [
                 {
                     "title": "整理 10 篇相关论文",
-                    "description": "记录模型、数据和实验工况。",
+                    "description": "记录方法、数据和评价指标。",
                     "status": "done",
                     "priority": "high",
                     "dueDate": null
@@ -1726,7 +1726,7 @@ mod tests {
             ],
             "repositories": [],
             "status": "not_started",
-            "tags": ["转轮除湿", "实验"],
+            "tags": ["公开数据集", "实验"],
             "priority": "medium",
             "progress": 0,
             "notes": ""

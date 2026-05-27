@@ -26,7 +26,7 @@ Manual decision to turn a Research Idea into a Formal Project.
 
 ## Formal Project
 
-Approved research project with a project ID, project folder, index entry, research plan, todos, and project materials.
+Approved research project with a project ID, project folder, index entry, research plan, todos, and project materials. Its initial template is intentionally minimal: `00_docs/` and `99_archive/` only; users create domain-specific working folders themselves.
 
 ## Project Todo
 
