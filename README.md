@@ -195,13 +195,15 @@ Initialize the ResearchProjects root used by NEW IDEAS:
 npm run research:init
 ```
 
-By default this creates or repairs `ResearchProjects` next to this `New-Ideas` folder, for example `F:\My-APP\ResearchProjects`, without overwriting existing files. To use another path:
+By default this creates or repairs `ResearchProjects` next to this `New-Ideas` folder, for example `<parent-of-New-Ideas>\ResearchProjects`, without overwriting existing files. To use another path:
 
 ```bash
 npm run research:init -- --root D:\ResearchProjects
 ```
 
 You can also set `RESEARCH_ROOT` before running the Tauri app if you need a custom root for one device.
+
+The generated project template is intentionally minimal. `templates/project_template/` contains only `00_docs/` and `99_archive/`; project-specific folders are created by users as needed.
 
 Run the Tauri desktop app:
 

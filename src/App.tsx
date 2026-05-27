@@ -575,10 +575,10 @@ export default function App() {
     const defaultProjectId = sourceIdea.projectId || "P001";
     const projectId = window.prompt("Project ID，例如 P001", defaultProjectId)?.trim();
     if (!projectId) return;
-    const projectName = window.prompt("Project name，例如 tri_layer_wavy_microchannel", slugifyProjectName(sourceIdea.title))?.trim();
+    const projectName = window.prompt("Project name，例如 literature_review_tool", slugifyProjectName(sourceIdea.title))?.trim();
     if (!projectName) return;
-    const mainTool = window.prompt("Main tool，例如 Fluent", "")?.trim() ?? "";
-    const projectType = window.prompt("Project type，例如 CFD", "")?.trim() ?? "";
+    const mainTool = window.prompt("Main tool，例如 Python", "")?.trim() ?? "";
+    const projectType = window.prompt("Project type，例如 Literature Review", "")?.trim() ?? "";
     const notes = window.prompt("Project index notes", `Promoted from ${sourceIdea.externalIdeaId ?? sourceIdea.id}`)?.trim() ?? "";
 
     try {
@@ -3065,7 +3065,7 @@ function AIIdeaModal({
             value={input}
             onChange={(event) => setInput(event.target.value)}
             rows={6}
-            placeholder="例如：研究转轮除湿系统中传感器噪声对模型辨识的影响，可能用 UKF 或粒子滤波做数据同化。"
+            placeholder="例如：研究一个公开数据集上的方法对比，整理背景、核心问题、实验路线和待验证假设。"
             autoFocus
           />
         </label>
@@ -3212,7 +3212,7 @@ function IdeaEditorModal({
 
           <label className="field wide">
             <span>Tags</span>
-            <input value={tagsInput} onChange={(event) => setTagsInput(event.target.value)} placeholder="MLP, CFD, 论文想法" />
+            <input value={tagsInput} onChange={(event) => setTagsInput(event.target.value)} placeholder="baseline, dataset, paper idea" />
           </label>
 
           <label className="field wide">
