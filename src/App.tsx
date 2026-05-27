@@ -165,6 +165,38 @@ const repositoryTypeFromFile = (path: string): RepositoryType => {
 };
 const normalizeDialogPath = (selected: string | string[] | null) => (Array.isArray(selected) ? selected[0] : selected);
 
+type IdeaMirrorResult = {
+  ideaId: string;
+  externalIdeaId: string;
+  ideaPoolPath: string;
+};
+
+type ProjectPromotionResult = {
+  projectId: string;
+  projectPath: string;
+};
+
+function slugifyProjectName(value: string) {
+  const slug = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 64);
+  return slug || "untitled_project";
+}
+
+function projectRepository(projectId: string, projectPath: string): RelatedRepository {
+  return {
+    id: createId("repo"),
+    name: pathName(projectPath) || projectId,
+    type: "local_folder",
+    urlOrPath: projectPath,
+    note: `Promoted from ${projectId}`,
+    indexedAt: new Date().toISOString(),
+  };
+}
+
 const providerBaseUrls: Record<LlmSettings["provider"], string> = {
   "openai-compatible": "https://api.openai.com/v1",
   openai: "https://api.openai.com/v1",
@@ -408,6 +440,7 @@ export default function App() {
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [localNotice, setLocalNotice] = useState("");
   const importInputRef = useRef<HTMLInputElement>(null);
+  const mirrorTimerRef = useRef<number | null>(null);
   const t = useMemo(() => createTranslator(settings.language), [settings.language]);
 
   function showLocalNotice(message: string) {
@@ -436,7 +469,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (storageReady) void saveIdeas(ideas);
+    if (!storageReady) return;
+    void saveIdeas(ideas);
+    if (mirrorTimerRef.current) window.clearTimeout(mirrorTimerRef.current);
+    mirrorTimerRef.current = window.setTimeout(() => {
+      void mirrorIdeasToResearchProjects(ideas);
+    }, 600);
+    return () => {
+      if (mirrorTimerRef.current) window.clearTimeout(mirrorTimerRef.current);
+    };
   }, [ideas, storageReady]);
 
   useEffect(() => {
@@ -488,6 +529,81 @@ export default function App() {
     const ideaWithTimestamp = withCalculatedIdeaProgress({ ...updatedIdea, updatedAt: new Date().toISOString() });
     setIdeas((current) => current.map((idea) => (idea.id === ideaWithTimestamp.id ? ideaWithTimestamp : idea)));
     setSelectedId(ideaWithTimestamp.id);
+  }
+
+  async function mirrorIdeasToResearchProjects(nextIdeas: Idea[]) {
+    if (nextIdeas.length === 0) return;
+    try {
+      const results = await invoke<IdeaMirrorResult[]>("mirror_research_ideas", { ideas: nextIdeas });
+      setIdeas((current) => {
+        let changed = false;
+        const byId = new Map(results.map((result) => [result.ideaId, result]));
+        const merged = current.map((idea) => {
+          const result = byId.get(idea.id);
+          if (!result) return idea;
+          if (idea.externalIdeaId === result.externalIdeaId && idea.ideaPoolPath === result.ideaPoolPath) return idea;
+          changed = true;
+          return {
+            ...idea,
+            externalIdeaId: idea.externalIdeaId ?? result.externalIdeaId,
+            ideaPoolPath: idea.ideaPoolPath ?? result.ideaPoolPath,
+          };
+        });
+        return changed ? merged : current;
+      });
+    } catch (error) {
+      console.warn("ResearchProjects mirror skipped.", error);
+    }
+  }
+
+  async function promoteIdeaToProject(idea: Idea) {
+    if (idea.projectId && !window.confirm(`Idea 已绑定 ${idea.projectId}。仍要创建另一个项目吗？`)) return;
+    let sourceIdea = idea;
+    if (!sourceIdea.externalIdeaId || !sourceIdea.ideaPoolPath) {
+      try {
+        const [result] = await invoke<IdeaMirrorResult[]>("mirror_research_ideas", { ideas: [sourceIdea] });
+        if (result) {
+          sourceIdea = { ...sourceIdea, externalIdeaId: result.externalIdeaId, ideaPoolPath: result.ideaPoolPath };
+          setIdeas((current) => current.map((item) => (item.id === sourceIdea.id ? sourceIdea : item)));
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        window.alert(message.includes("__TAURI__") ? "Project promotion requires the Tauri desktop runtime." : message || "创建项目失败。");
+        return;
+      }
+    }
+    const defaultProjectId = sourceIdea.projectId || "P001";
+    const projectId = window.prompt("Project ID，例如 P001", defaultProjectId)?.trim();
+    if (!projectId) return;
+    const projectName = window.prompt("Project name，例如 tri_layer_wavy_microchannel", slugifyProjectName(sourceIdea.title))?.trim();
+    if (!projectName) return;
+    const mainTool = window.prompt("Main tool，例如 Fluent", "")?.trim() ?? "";
+    const projectType = window.prompt("Project type，例如 CFD", "")?.trim() ?? "";
+    const notes = window.prompt("Project index notes", `Promoted from ${sourceIdea.externalIdeaId ?? sourceIdea.id}`)?.trim() ?? "";
+
+    try {
+      const result = await invoke<ProjectPromotionResult>("promote_idea_to_project", {
+        input: { idea: sourceIdea, projectId, projectName, mainTool, projectType, notes },
+      });
+      const repo = projectRepository(sourceIdea.externalIdeaId ?? sourceIdea.id, result.projectPath);
+      setIdeas((current) =>
+        current.map((item) => {
+          if (item.id !== sourceIdea.id) return item;
+          const hasRepo = item.repositories.some((existing) => existing.urlOrPath === result.projectPath);
+          return {
+            ...item,
+            projectId: result.projectId,
+            projectPath: result.projectPath,
+            repositories: hasRepo ? item.repositories : [...item.repositories, repo],
+            updatedAt: new Date().toISOString(),
+          };
+        }),
+      );
+      showLocalNotice(`已创建项目 ${result.projectId}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      window.alert(message.includes("__TAURI__") ? "Project promotion requires the Tauri desktop runtime." : message || "创建项目失败。");
+    }
   }
 
   function saveModalIdea(idea: Idea) {
@@ -1062,6 +1178,7 @@ export default function App() {
               onEdit={(idea) => setEditingIdea(idea)}
               onDelete={deleteIdea}
               onAbandon={(idea) => changeIdeaStatus(idea.id, "abandoned")}
+              onPromote={promoteIdeaToProject}
               onStatusChange={changeIdeaStatus}
               onSaveTodo={saveProjectTodo}
               onChangeTodoStatus={changeProjectTodoStatus}
@@ -1550,6 +1667,7 @@ function IdeaDetail({
   onEdit,
   onDelete,
   onAbandon,
+  onPromote,
   onStatusChange,
   onSaveTodo,
   onChangeTodoStatus,
@@ -1567,6 +1685,7 @@ function IdeaDetail({
   onEdit: (idea: Idea) => void;
   onDelete: (id: string) => void;
   onAbandon: (idea: Idea) => void;
+  onPromote: (idea: Idea) => void;
   onStatusChange: (id: string, status: IdeaStatus) => void;
   onSaveTodo: (ideaId: string, todo: TodoItem) => void;
   onChangeTodoStatus: (ideaId: string, todoId: string, status: TodoStatus) => void;
@@ -1607,6 +1726,9 @@ function IdeaDetail({
           </p>
         </div>
         <div className="detail-actions">
+          <button className="ghost-button icon-button" title={idea.projectId ? `Project ${idea.projectId}` : "Create Project from Idea"} onClick={() => onPromote(idea)}>
+            <Database size={18} />
+          </button>
           <button className="ghost-button icon-button" title="编辑" onClick={() => onEdit(idea)}>
             <Pencil size={18} />
           </button>
@@ -1628,6 +1750,10 @@ function IdeaDetail({
       </div>
 
       <div className="meta-strip">
+        <span>
+          <Database size={16} />
+          {idea.externalIdeaId ?? "未镜像"}{idea.projectId ? ` -> ${idea.projectId}` : ""}
+        </span>
         <span>
           <ListTodo size={16} />
           {todoSummary.total ? `${todoSummary.done}/${todoSummary.total} completed · ${todoProgress}%` : t("idea.no_todos")}

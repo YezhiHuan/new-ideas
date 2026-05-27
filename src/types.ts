@@ -99,6 +99,10 @@ export interface Idea {
   targetDate?: string;
   progress?: number;
   notes?: string;
+  externalIdeaId?: string;
+  ideaPoolPath?: string;
+  projectId?: string;
+  projectPath?: string;
 }
 
 export interface IdeaDraft {
